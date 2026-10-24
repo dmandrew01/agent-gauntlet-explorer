@@ -1,0 +1,84 @@
+{
+  "measured_at": "2026-10-24T01:23:00",
+  "proxy": "https://gauntlet-practice.136.85.160.148.sslip.io/proxy",
+  "source": "tools/calibrate_models.py --probes 4 --timeout 45 (run by AHGroup on Practice)",
+  "models": {
+    "nemotron-3.5-lightning": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 0.75,
+      "median_latency_s": 4.77,
+      "avg_tokens": 1286
+    },
+    "qwen3.6-35b": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 0.75,
+      "median_latency_s": 6.94,
+      "avg_tokens": 1509
+    },
+    "qwen3.7-flash": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 0.75,
+      "median_latency_s": 11.13,
+      "avg_tokens": 1639
+    },
+    "nemotron-3-super": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 0.75,
+      "median_latency_s": 3.78,
+      "avg_tokens": 166
+    },
+    "qwen3.7-plus": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 11.12,
+      "avg_tokens": 679
+    },
+    "gemini-3.6-flash": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 2.41,
+      "avg_tokens": 378
+    },
+    "gemini-3.8-flash": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 4.3,
+      "avg_tokens": 288
+    },
+    "nemotron-3-ultra": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 2.54,
+      "avg_tokens": 241
+    },
+    "qwen3.7-max": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 5.44,
+      "avg_tokens": 820
+    },
+    "gpt-5.4": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 1.51,
+      "avg_tokens": 71
+    },
+    "gpt-5.6-terra": {
+      "trials": 4,
+      "errors": 0,
+      "accuracy": 1.0,
+      "median_latency_s": 1.13,
+      "avg_tokens": 63
+    }
+  }
+}

@@ -28,7 +28,7 @@ FAMILY_TABLE: list[tuple[str, int, int, bool]] = [
     (r"qwen.*3.*(235b|480b|max)", 88, 45, True),
     (r"kimi.*k2", 87, 50, True),
     (r"glm.?4\.[5-9]|glm.?5", 85, 50, True),
-    (r"nemotron.*ultra", 88, 35, True),
+    (r"nemotron.*ultra", 88, 65, True),  # Practice: 2.5 s median, 4/4
     (r"nemotron.*super", 84, 55, True),
     (r"llama.*nemotron.*(253b|ultra)", 88, 35, True),
     (r"llama.*nemotron.*(49b|super)", 84, 55, True),
