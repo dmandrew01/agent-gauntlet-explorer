@@ -1010,23 +1010,28 @@ def _tool_entries(data: Any) -> list[dict[str, Any]]:
     """Find tool-like dicts (each with a name) anywhere in a catalog payload."""
     out: list[dict[str, Any]] = []
 
-    def walk(node: Any, depth: int) -> None:
+    def walk(node: Any, depth: int, key: str) -> None:
         if depth > 4 or len(out) > 200:
             return
+        # Practice's arena.tools.list returns {"tools": ["arena.clues.get", ...]}.
+        # Under a tool-ish key every identifier is a tool name, even a bare word.
+        toolish = bool(re.search(r"tool|function|capabilit|available|hidden|unlocked", key, re.I))
         if isinstance(node, list):
             for item in node:
-                if isinstance(item, str) and re.fullmatch(r"[A-Za-z_][\w.\-]{2,63}", item) and ("." in item or "_" in item):
+                if isinstance(item, str) and re.fullmatch(r"[A-Za-z_][\w.\-]{1,63}", item) and (
+                    toolish or "." in item or "_" in item
+                ):
                     out.append({"name": item})
                 else:
-                    walk(item, depth + 1)
+                    walk(item, depth + 1, key)
         elif isinstance(node, dict):
             if isinstance(node.get("name"), str) and (
                 "description" in node or "input_schema" in node or "inputSchema" in node or "parameters" in node
             ):
                 out.append(node)
                 return
-            for value in node.values():
-                walk(value, depth + 1)
+            for k, value in node.items():
+                walk(value, depth + 1, str(k))
 
-    walk(data, 0)
+    walk(data, 0, "")
     return out

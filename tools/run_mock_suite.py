@@ -76,6 +76,7 @@ def main() -> int:
         plan.append(("image_edit", {"MOCK_IMAGE_FLAKY_MODEL": "mock/painter-image"}, {"_label": "preferred image model returns no image"}))
         plan.append(("text_logic", {"MOCK_LOBBY_S": "3"}, {"_label": "lobby, then GO"}))
         plan.append(("blackbox", {"MOCK_NO_NOTE": "1"}, {"GAUNTLET_PROBE": "0", "_label": "hidden tool only in arena.tools.list"}))
+        plan.append(("blackbox", {"MOCK_NOTE_KEY_ONLY": "1", "MOCK_CATALOG_NAMES_ONLY": "1"}, {"GAUNTLET_PROBE": "0", "_label": "catalog gives names only (Practice format)"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()

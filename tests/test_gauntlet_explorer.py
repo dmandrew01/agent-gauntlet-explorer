@@ -125,6 +125,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([t["name"] for t in _tool_entries(payload)], ["vault.open", "a.b"])
         self.assertEqual([t["name"] for t in _tool_entries({"available": ["arena.get_challenge", "hidden_tool"]})],
                          ["arena.get_challenge", "hidden_tool"])
+        # Practice format: names only, under "tools"; bare words count there.
+        self.assertEqual([t["name"] for t in _tool_entries({"tools": ["arena.clues.get", "oracle"], "count": 2})],
+                         ["arena.clues.get", "oracle"])
+        self.assertEqual(_tool_entries({"notes": ["oracle"]}), [])
 
 
 class AnswerTests(unittest.TestCase):
