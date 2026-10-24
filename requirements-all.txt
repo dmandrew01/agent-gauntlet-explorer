@@ -1,0 +1,2 @@
+# Reproducible full framework install including CrewAI (Python 3.12, which submissions run on).
+-r requirements/requirements-all.lock

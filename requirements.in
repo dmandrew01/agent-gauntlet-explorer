@@ -1,0 +1,14 @@
+# Dependency source for regenerating requirements/requirements.lock.
+# Add your agent's extra dependencies here, then regenerate the lock
+# (see docs/submitting.md).
+# Python 3.14 is not supported by the current sample-agent framework stack.
+agent-arena-starter-kit-requires-python-3-11-through-3-13; python_version < "3.11" or python_version >= "3.14"
+
+mcp>=1.9,<2
+python-dotenv
+requests
+
+# LangGraph sample agent framework used by examples/langgraph.
+langgraph>=1.2,<2
+langchain-openai>=1.3,<2
+langchain-mcp-adapters>=0.3,<1

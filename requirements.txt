@@ -1,0 +1,2 @@
+# Reproducible base and LangGraph install (Python 3.12, which submissions run on).
+-r requirements/requirements.lock

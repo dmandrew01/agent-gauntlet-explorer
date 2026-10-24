@@ -1,0 +1,3 @@
+# Source profile for regenerating requirements/requirements-all.lock (CrewAI).
+-r requirements.in
+-r requirements-crewai.in

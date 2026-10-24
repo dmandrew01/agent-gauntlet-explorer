@@ -1,0 +1,2 @@
+# Optional heavy CrewAI stack used by examples/crewai.
+crewai[tools]>=1.15,<2
