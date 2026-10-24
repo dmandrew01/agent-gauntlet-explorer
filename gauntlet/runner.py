@@ -409,6 +409,7 @@ async def solve_text(state: RunState, box: BlackBox) -> str:
     state.record["challenge"] = {k: v for k, v in challenge.items() if k != "clues"}
     log(f"challenge {challenge.get('puzzle_id') or challenge.get('challenge_id')} type={challenge.get('challenge_type')} "
         f"limit={challenge.get('max_time_s')}s :: {description[:160]}")
+    state.record["timeline"] = {"challenge": 0.0}
     await state.thoughts.say(f"Challenge in hand ({challenge.get('challenge_type') or 'text'}). Reading clues.", force=True)
     box.ctx.challenge_text = description
 
@@ -448,7 +449,9 @@ async def solve_text(state: RunState, box: BlackBox) -> str:
     await state.thoughts.detail(f"Final answer: {answer[:120]}")
     await state.thoughts.flush(timeout=2.0)
     total_ms = int(clock.elapsed() * 1000)
+    state.record.setdefault("timeline", {})["submit_start"] = round(clock.elapsed(), 1)
     result = await _submit_text(state, answer, total_ms)
+    state.record["timeline"]["submit_done"] = round(clock.elapsed(), 1)
     state.record.update({"answer": answer, "confidence": work["confidence"], "mode": work["mode"]})
     return result
 
@@ -468,6 +471,7 @@ async def _solve_text_body(state: RunState, box: BlackBox, challenge: dict[str, 
     work["clues"] = clues
     box.ctx.challenge_text = description or (clues[0] if clues else "")
     evidence = await _call_required(box, required, description, clues)
+    state.record.setdefault("timeline", {})["clues_and_required"] = round(clock.elapsed(), 1)
 
     spec = infer_format(rules, description)
     ctx = _ctx(challenge, clues=clues, models=state.models, clock=clock)
@@ -598,6 +602,39 @@ FORMAT_GUARD = (
 )
 
 
+def _family(name: str) -> str:
+    return re.split(r"[-_.\d]", name.rsplit("/", 1)[-1].lower(), maxsplit=1)[0]
+
+
+def _direct_lineup(model: str, ranked: list[str], *, tight: bool = False) -> list[str]:
+    """Primary model, a capable partner from another family, and a tie-breaker.
+
+    Practice showed a single slow pick costing a 60 s puzzle. Asking two
+    models costs a few hundred tokens (5% axis) and protects quality (70%)
+    and speed (15%). The third model only runs when the first two disagree.
+    """
+    from .models import _apply_stats, load_stats, score_model
+
+    stats = load_stats()
+    scored = {}
+    for name in ranked[:8]:
+        m = score_model(name)
+        _apply_stats(m, stats)
+        scored[name] = m
+    speed_w = 0.6 if tight else 0.2
+    others = [n for n in ranked[:8] if n != model and scored[n].quality >= 72]
+    others.sort(key=lambda n: (_family(n) == _family(model), -(scored[n].quality + speed_w * scored[n].speed)))
+    lineup = [model] + others[:1]
+    rest = [n for n in others[1:] if _family(n) not in {_family(x) for x in lineup}] or others[1:]
+    rest.sort(key=lambda n: -(scored[n].quality + speed_w * scored[n].speed))
+    return lineup + rest[:1]
+
+
+def _norm(answer: str, spec) -> str:
+    fixed, _ = enforce(answer, spec)
+    return re.sub(r"\s+", " ", fixed).strip().lower()
+
+
 async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, model: str, ranked: list[str],
                         clock: Clock, spec, evidence: list[str]) -> tuple[str, float]:
     assert state.llm is not None
@@ -612,28 +649,99 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
     params = state.strategy.get_llm_params(ctx)
     max_tokens = int(params.get("max_tokens", 8192))
     temperature = params.get("temperature", 0.0)
-    tried: list[str] = []
-    for attempt_model in [model] + [m for m in ranked if m != model][:2]:
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    attempts = state.record.setdefault("llm_attempts", [])
+
+    async def ask(m: str, timeout: float, tokens: int) -> tuple[str, str]:
+        reply = await state.llm.chat(m, messages, max_tokens=tokens, temperature=temperature, timeout_s=timeout)
+        answer = extract_answer(reply.content or "", spec)
+        if not answer and reply.reasoning and "answer" in reply.reasoning.lower():
+            answer = extract_answer(reply.reasoning, spec)
+        if is_invalid(answer):
+            answer = ""
+        attempts.append({"stage": "direct", "model": m, "ms": reply.elapsed_ms, "finish": reply.finish_reason,
+                         "error": reply.error[:160], "answer": answer[:200],
+                         "tokens": reply.prompt_tokens + reply.completion_tokens, "t": round(clock.elapsed(), 1)})
+        log(f"direct[{m}] {reply.elapsed_ms}ms finish={reply.finish_reason} err={reply.error[:80]} answer={answer[:100]!r}")
+        return answer, reply.finish_reason
+
+    hedge = os.getenv("GAUNTLET_HEDGE", "1").lower() not in {"0", "false", "no"}
+    tight = 0 < float(ctx.max_time_s or 0) <= 60
+    lineup = _direct_lineup(model, ranked, tight=tight) if hedge else [model]
+    log(f"direct lineup: {lineup}")
+    tried: set[str] = set()
+    if len(lineup) >= 2 and clock.left() > 10:
+        primary, partner = lineup[0], lineup[1]
+        budget = clock.budget(0.85, floor_s=5)
+        tasks = {asyncio.create_task(ask(m, budget, max_tokens)): m for m in (primary, partner)}
+        tried.update((primary, partner))
+        got: dict[str, str] = {}
+        soft_deadline: float | None = None
+        pending = set(tasks)
+        while pending:
+            wait = None if soft_deadline is None else max(0.0, soft_deadline - time.monotonic())
+            done, pending = await asyncio.wait(pending, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                log("second model too slow; deciding with what arrived")
+                break
+            for task in done:
+                try:
+                    answer, _finish = task.result()
+                except Exception as exc:
+                    log(f"direct task failed: {exc}")
+                    answer = ""
+                if answer:
+                    got[tasks[task]] = answer
+                    await _draft(state, answer, f"direct solve with {tasks[task]}")
+            if primary in got and partner in got:
+                break
+            if got and soft_deadline is None:
+                # One answer is in. Give the other a bounded window: longer when the
+                # trusted primary is the one still thinking.
+                if primary not in got:
+                    window = min(clock.left() * 0.3, 15.0) if tight else min(clock.left() * 0.45, 30.0)
+                else:
+                    window = min(clock.left() * 0.25, 8.0) if tight else min(clock.left() * 0.3, 12.0)
+                soft_deadline = time.monotonic() + max(4.0, window)
+        for task in pending:
+            task.cancel()
+        if primary in got and partner in got:
+            if _norm(got[primary], spec) == _norm(got[partner], spec):
+                state.model_used = primary
+                return got[primary], 0.95
+            # Disagreement: a third model breaks the tie when time allows.
+            if len(lineup) > 2 and clock.left() > 15:
+                judge = lineup[2]
+                tried.add(judge)
+                third, _ = await ask(judge, clock.budget(0.6, floor_s=5), max_tokens)
+                if third:
+                    for name in (primary, partner):
+                        if _norm(third, spec) == _norm(got[name], spec):
+                            state.model_used = name
+                            log(f"tie broken by {judge}: {name}")
+                            await _draft(state, got[name], f"majority with {judge}")
+                            return got[name], 0.85
+            state.model_used = primary
+            await _draft(state, got[primary], "primary after disagreement")
+            return got[primary], 0.6
+        if primary in got:
+            state.model_used = primary
+            return got[primary], 0.75
+        if partner in got:
+            state.model_used = partner
+            return got[partner], 0.6
+    # Sequential fallback over the remaining ranked models.
+    for m in [x for x in [model] + ranked if x not in tried][:3]:
         if clock.left() < 8:
             break
-        tried.append(attempt_model)
-        timeout = clock.budget(0.85 if len(tried) == 1 else 0.7, floor_s=5)
-        reply = await state.llm.chat(attempt_model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                                     max_tokens=max_tokens, temperature=temperature, timeout_s=timeout)
-        raw = reply.content or ""
-        answer = extract_answer(raw, spec)
-        if not answer and reply.reasoning:
-            answer = extract_answer(reply.reasoning, spec) if "answer" in reply.reasoning.lower() else ""
-        log(f"direct[{attempt_model}] {reply.elapsed_ms}ms finish={reply.finish_reason} err={reply.error[:80]} answer={answer[:100]!r}")
-        if answer and not is_invalid(answer):
-            state.model_used = attempt_model
-            await _draft(state, answer, f"direct solve with {attempt_model}")
-            return answer, 0.75
-        if reply.error and "timeout" not in reply.error:
-            continue
-        if reply.finish_reason == "length":
-            max_tokens = max(2048, max_tokens // 2) if len(tried) > 1 else max_tokens
-            continue
+        tried.add(m)
+        answer, finish = await ask(m, clock.budget(0.7, floor_s=5), max_tokens)
+        if answer:
+            state.model_used = m
+            await _draft(state, answer, f"direct solve with {m}")
+            return answer, 0.7
+        if finish == "length":
+            max_tokens = max(2048, max_tokens // 2)
     return "", 0.0
 
 
@@ -816,6 +924,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
         analyzer = box.find("image_analyze") or next(iter(box.by_kind("image_analyze")), None)
         if input_uri and analyzer and clock.left() > 0.55 * clock.max_time_s:
             extra = build_image_tool_arguments(list(_raw_defs(box)), analyzer.name, selected_model="", llm_api_key=state.api_key, arena_api_key=state.api_key)
+            state.record.setdefault("timeline", {})["analyze_start"] = round(clock.elapsed(), 1)
             ares = await box.call(analyzer.name, {"image_uri": input_uri, "question": (
                 "Describe this image precisely: subjects, layout, colors, lighting, style, any text. "
                 f"Then list what must stay unchanged when applying this edit: {prompt}"), "agent_id": state.agent_id, **extra},
@@ -844,7 +953,9 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
                 args["image_uri"] = input_uri
             await state.thoughts.say("Producing the image.")
             await state.thoughts.detail(f"{plan} with {model or 'default model'}")
+            state.record.setdefault("timeline", {})[f"{plan}_start:{model}"] = round(clock.elapsed(), 1)
             r = await box.call(plan, args, source="image", timeout_s=max(10, clock.left() - 8))
+            state.record["timeline"][f"{plan}_done:{model}"] = round(clock.elapsed(), 1)
             candidate = str((r.get("dict") or {}).get("image_uri") or "").strip()
             if not candidate and r.get("images"):
                 img = r["images"][0]
@@ -873,6 +984,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
         return "no-image"
 
     total_ms = int(clock.elapsed() * 1000)
+    state.record.setdefault("timeline", {})["submit_start"] = round(clock.elapsed(), 1)
     metrics = _metrics(state, total_ms)
     metrics["planner_tool"] = plan
     await state.thoughts.say("Submitting the image.", force=True)

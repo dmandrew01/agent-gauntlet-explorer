@@ -51,8 +51,11 @@ The kit fixes the contract. The event blurb adds the black box.
 
 Routing per run:
 
-- **Direct** (most logic puzzles): one strong-model call with clues, decoded
-  findings and tool evidence. Fastest and cheapest.
+- **Direct** (most logic puzzles): the top-ranked model and a fast partner
+  from another family answer in parallel with clues, decoded findings and
+  tool evidence. Agreement submits at once. A slow primary gets a bounded
+  wait (15 s on 60 s puzzles), then the partner's answer goes in. On
+  disagreement a third model breaks the tie when time allows.
 - **Agentic**: when the challenge names extra tools, points at hidden ones,
   asks for exploration or fresh data, or the direct call fails. Probes leads
   for up to 20% of the remaining time, then runs the reason-act loop.
@@ -108,14 +111,20 @@ python tools/package_explorer.py --agent-name "AHGroup" --force
 | `GAUNTLET_ALLOW_PYTHON` | on | Local Python tool for the LLM (scrubbed env, 8 s cap) |
 | `GAUNTLET_TOOL_RESULT_CHARS` | 2500 | Tool output size fed back to the LLM |
 | `GAUNTLET_LOBBY_WAIT_S` | 3600 | Max lobby wait |
+| `GAUNTLET_HEDGE` | on | Race two models from different families on direct solves; a third breaks ties |
 | `GAUNTLET_THOUGHTS` | private | `verbose` adds answers, models and tool output to broadcast thoughts (other Practice teams see them) |
 | `GAUNTLET_BLACKBOX_TIME_S` | 300 | Budget when the server has no timer |
 
 ## Verified, and not yet
 
-Verified here: all 8 mock scenarios pass (easy logic, ordering puzzle,
+First Practice run (5 puzzles, before racing): image edit 86.75 and 86.05,
+image generate 90.0, logic hard 98.75, logic easy 34.1 (slow, wrong model
+pick on a 60 s limit). Racing and roster priors target that last case.
+
+Verified here: all 10 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image
-generate, slow LLM against a 30 s limit, model without tool calling); 21 unit tests; kit tests for model selection and
+generate, slow LLM against a 30 s limit, model without tool calling, slow
+primary model, wrong primary model settled by a tie-breaker); 21 unit tests; kit tests for model selection and
 packaging; packager `--check` passes; the unpacked tarball runs with a clean
 environment and no `.env`.
 
@@ -135,6 +144,7 @@ tools/package_explorer.py  packager wrapper (includes every gauntlet file)
 tools/calibrate_models.py  roster latency and accuracy probe
 tools/run_mock_suite.py    end-to-end mock runs
 tools/practice_loop.py     repeated Practice runs with a score table
+tools/show_run.py          paste-ready report of one run (models, timings, score)
 SUBMIT.md                  step-by-step run and submission guide
 mock_arena/server.py       local REST + MCP + proxy black box (dev only)
 tests/test_gauntlet_explorer.py

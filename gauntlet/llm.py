@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 import re
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,10 @@ try:
     from openai import OpenAI
 except ImportError:  # the kit's lock has openai; this keeps bare machines working
     OpenAI = None  # type: ignore[assignment]
+
+# Own pool: an abandoned slow request must not hold up the run's exit the way
+# the default executor would (asyncio.run joins it for up to 5 minutes).
+_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="gauntlet-llm")
 
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.S | re.I)
 _FN_NAME_OK = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -119,8 +124,9 @@ class LLM:
             kwargs["response_format"] = response_format
         started = time.monotonic()
         try:
+            loop = asyncio.get_running_loop()
             resp = await asyncio.wait_for(
-                asyncio.to_thread(self._client.chat.completions.create, **kwargs),
+                loop.run_in_executor(_POOL, lambda: self._client.chat.completions.create(**kwargs)),
                 timeout=timeout_s + 2,
             )
         except asyncio.TimeoutError:

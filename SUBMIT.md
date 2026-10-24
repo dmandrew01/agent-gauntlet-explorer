@@ -93,7 +93,18 @@ What to check in the table:
   organizer's side; run again.
 
 Each run record lands in `outputs/dmandrew01-run-<n>.json` with the
-challenge, every tool call, the answer, and the score breakdown.
+challenge, every tool call, the answer, and the score breakdown. For a
+readable report of runs 1 to 5:
+
+```bash
+python tools/show_run.py 1 2 3 4 5
+```
+
+To pull the latest agent changes before a new round of runs:
+
+```bash
+git pull
+```
 
 Other teams share the Practice key and see your runs. The agent keeps answers,
 model names, and tool output out of its broadcast thoughts unless you set

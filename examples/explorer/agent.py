@@ -12,6 +12,7 @@ sets the environment).
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -38,4 +39,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    code = main()
+    # The answer is submitted and the run record written by now. Exit at once
+    # instead of waiting on an abandoned slow model request to time out.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code if isinstance(code, int) else 1)

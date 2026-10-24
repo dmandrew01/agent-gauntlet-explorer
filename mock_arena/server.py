@@ -295,11 +295,18 @@ async def leaderboard(_: Request) -> JSONResponse:
 # LLM proxy with the mock brain
 
 
+# Names follow the Practice roster's families so the ranker treats them alike.
 MODELS = [
-    {"id": "mock/reasoner-large"},
+    {"id": "mock/gemini-3.8-flash"},
+    {"id": "mock/qwen3.7-plus"},
+    {"id": "mock/nemotron-3-ultra"},
     {"id": "mock/fast-mini"},
     {"id": "mock/painter-image", "capabilities": ["image"]},
 ]
+# Test knobs: one model answers slowly or wrongly.
+SLOW_MODEL = os.getenv("MOCK_SLOW_MODEL", "")
+SLOW_S = float(os.getenv("MOCK_SLOW_S", "0") or 0)
+WRONG_MODEL = os.getenv("MOCK_WRONG_MODEL", "")
 
 
 async def models(request: Request) -> JSONResponse:
@@ -371,7 +378,13 @@ async def chat(request: Request) -> JSONResponse:
         return JSONResponse({"error": {"message": f"model {model} not on roster"}}, status_code=400)
     if req.get("tools") and model == "mock/fast-mini":
         return JSONResponse({"error": {"message": "This model does not support tools / function calling"}}, status_code=400)
+    if model == SLOW_MODEL and SLOW_S:
+        import asyncio
+
+        await asyncio.sleep(SLOW_S)
     final, plain, calls = mock_brain(req)
+    if final is not None and model == WRONG_MODEL:
+        final = {"answer": "Cy" if final["answer"] == "Bob" else "WRONG"}
     json_mode = "ONE JSON object" in _all_text(req.get("messages", [])) or "one JSON action" in _all_text(req.get("messages", []))
     message: dict[str, Any] = {"role": "assistant", "content": None}
     if req.get("tools"):

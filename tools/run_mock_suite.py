@@ -70,13 +70,15 @@ def main() -> int:
     if args.deadline:
         plan.append(("text_logic", {"MOCK_LLM_DELAY_S": "40", "MOCK_LOGIC_TIME_S": "30"}, {}))
         plan.append(("blackbox", {}, {"GAUNTLET_PROBE": "0", "GAUNTLET_MODEL_PREFERENCE": "mock/fast-mini"}))
+        plan.append(("text_logic", {"MOCK_SLOW_MODEL": "mock/gemini-3.8-flash", "MOCK_SLOW_S": "45"}, {"_label": "primary model slow"}))
+        plan.append(("text_logic", {"MOCK_WRONG_MODEL": "mock/gemini-3.8-flash"}, {"_label": "primary model wrong, tie-break"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()
         mock = start_mock(port, {"MOCK_SCENARIO": scenario, **mock_env})
         agent_id = f"suite-{scenario.replace('_', '-')}-{i}"
         try:
-            record, elapsed, out = run_agent(port, agent_id, agent_env, timeout=200)
+            record, elapsed, out = run_agent(port, agent_id, {k: v for k, v in agent_env.items() if not k.startswith("_")}, timeout=200)
         finally:
             mock.terminate()
         result = record.get("result") or {}
@@ -86,7 +88,11 @@ def main() -> int:
         ok = submitted and (accepted or not expect_accept)
         failures += 0 if ok else 1
         score = (result.get("score") or {}).get("final_score")
-        label = scenario + (" (slow LLM, must still submit)" if not expect_accept else "") + (" (JSON protocol)" if agent_env else "")
+        label = scenario + (" (slow LLM, must still submit)" if not expect_accept else "")
+        if agent_env.get("_label"):
+            label += f" ({agent_env['_label']})"
+        elif agent_env:
+            label += " (JSON protocol)"
         print(f"{'PASS' if ok else 'FAIL'}  {label:48s} accepted={accepted} score={score} "
               f"mode={record.get('mode', '-')} tools={len(record.get('tools_used', []))} thoughts={record.get('thoughts')} {elapsed:.1f}s")
         if not ok or args.verbose:
