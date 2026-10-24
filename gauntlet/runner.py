@@ -55,6 +55,7 @@ from .models import rank_image_models, rank_text_models
 from .react import ReactAgent
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PROC_T0 = time.monotonic()
 CORE_KINDS = {"challenge", "clue_list", "clue_get", "timer", "broadcast", "submit",
               "image_edit", "image_generate", "image_analyze"}
 # Seconds to wait for the partner model after the primary answered. Practice
@@ -169,37 +170,55 @@ async def run(strategy: BaseStrategy) -> int:
     log(f"agent={agent_id} api={api_base} mcp={mcp_url} proxy={proxy_host}")
 
     http = HttpArenaClient(api_base=api_base, api_key=api_key)
-    session = await asyncio.to_thread(http.register, agent_id, agent_name)
-    log(f"registered session={session.session_id} status={session.status}")
     thoughts = Thoughts(http, agent_id)
-    await thoughts.say("Explorer online. Mapping the arena before the start signal.", force=True)
     state = RunState(agent_id, agent_name, strategy, http, thoughts, proxy_host, api_key)
+    startup = state.record.setdefault("startup", {})
+
+    def mark(name: str) -> None:
+        startup[name] = round(time.monotonic() - PROC_T0, 2)
+
+    # Practice starts the speed clock at registration, and a live battle at GO.
+    # Everything that does not need a session happens first: MCP inventory,
+    # model roster, warm REST and proxy connections.
+    state.fast = FastSubmit(api_base, api_key)
+    state.fast.start()
     rows_task = asyncio.create_task(asyncio.to_thread(fetch_available_model_rows, proxy_host, api_key))
-    monitor = monitor_session(http, agent_id).start()
+    state.llm = LLM(proxy_host, api_key, agent_id, resolve_usage_scope())
+    asyncio.create_task(state.llm.warm())
+    monitor = None
     exit_code = 0
     try:
         async with ExplorerArenaClient(mcp_url) as client:
             box = BlackBox(client, agent_id)
             await box.inventory()
+            mark("inventory")
             log(f"inventory: {len(box.tools)} tools, {len(box.resources)} resources, {len(box.prompts)} prompts")
             for tool in box.tools.values():
                 log(f"  tool {tool.brief()[:160]}")
             state.record["inventory"] = box.inventory_text()
-            await _wait_for_go(state)
             state.model_rows = await rows_task
             state.models = [str(r["id"]) for r in state.model_rows if r.get("id")]
-            scope = await asyncio.to_thread(http.fetch_usage_scope) or resolve_usage_scope()
-            if scope:
-                os.environ["ARENA_USAGE_SCOPE"] = scope
-            state.llm = LLM(proxy_host, api_key, agent_id, scope)
-            state.fast = FastSubmit(api_base, api_key)
-            asyncio.create_task(state.llm.warm())
-            state.fast.start()
             client.sampling_responder = _sampling_responder(state)
             client.elicitation_values = {"agent_id": agent_id, "name": agent_name, "_default": agent_id}
 
-            modality = await asyncio.to_thread(McpArenaClient.detect_modality, list(box.tools), agent_id)
-            log(f"modality={modality} models={state.models[:8]}")
+            session = await asyncio.to_thread(http.register, agent_id, agent_name)
+            mark("registered")
+            log(f"registered session={session.session_id} status={session.status}")
+            await thoughts.say("Explorer online. Mapping the arena before the start signal.", force=True)
+            monitor = monitor_session(http, agent_id).start()
+            modality_task = asyncio.create_task(asyncio.to_thread(state.fast.lookup_modality, agent_id))
+
+            comp = await _wait_for_go(state)
+            mark("go")
+            scope = str((comp or {}).get("usage_scope") or "").strip() or resolve_usage_scope()
+            if scope:
+                os.environ["ARENA_USAGE_SCOPE"] = scope
+                state.llm.set_scope(scope)
+            modality = await modality_task
+            if modality not in {"text", "image"}:
+                modality = await asyncio.to_thread(McpArenaClient.detect_modality, list(box.tools), agent_id)
+            mark("modality")
+            log(f"modality={modality} models={state.models[:8]} startup={startup}")
             text_tool = box.find("arena.get_challenge")
             image_tool = box.find("arena.image.get_challenge")
             if modality == "image" and image_tool:
@@ -217,14 +236,17 @@ async def run(strategy: BaseStrategy) -> int:
             state.record["calls"] = [c.__dict__ for c in box.calls]
             state.record["notebook"] = box.notebook.render(12000)
     except asyncio.CancelledError:
-        if monitor.stop_reason is not None:
+        if monitor is not None and monitor.stop_reason is not None:
             log(f"stopped by server: {monitor.stop_reason.message}")
             exit_code = monitor.stop_reason.exit_code
         else:
             raise
     finally:
         await thoughts.flush()
-        await monitor.stop()
+        if monitor is not None:
+            await monitor.stop()
+        if state.fast is not None:
+            state.fast.stop()
         state.record.update({"agent_id": agent_id, "model": state.model_used, "thoughts": thoughts.count})
         if state.llm:
             state.record["llm_usage"] = state.llm.usage.__dict__
@@ -243,15 +265,19 @@ def _sampling_responder(state: RunState):
     return respond
 
 
-async def _wait_for_go(state: RunState) -> None:
-    """Poll the competition phase. Practice is always running; a live battle has a lobby."""
+async def _wait_for_go(state: RunState) -> dict[str, Any]:
+    """Poll the competition phase. Practice is always running; a live battle has a lobby.
+
+    Uses the warm REST session (no new TLS handshake per poll) and returns the
+    competition payload, which also carries the usage scope.
+    """
     last_phase = ""
     deadline = time.monotonic() + float(os.getenv("GAUNTLET_LOBBY_WAIT_S", "3600"))
     while time.monotonic() < deadline:
         try:
-            comp = await asyncio.to_thread(state.http.get_competition)
+            comp = await asyncio.to_thread(state.fast.get_json, "/api/competition")
         except Exception:
-            return  # endpoint unavailable; the challenge call itself will gate us
+            return {}  # endpoint unavailable; the challenge call itself will gate us
         phase = str(comp.get("phase") or "").lower()
         eligible = comp.get("eligible_agent_ids")
         if phase == "running":
@@ -259,22 +285,27 @@ async def _wait_for_go(state: RunState) -> None:
                 if last_phase != "ineligible":
                     log("battle running without us; waiting for the next one")
                     last_phase = "ineligible"
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
                 continue
             log("GO")
-            try:
-                await asyncio.to_thread(state.http.update_status, state.agent_id, "running")
-            except Exception:
-                pass
-            return
+            asyncio.create_task(asyncio.to_thread(_quiet, state.http.update_status, state.agent_id, "running"))
+            return comp
         if not phase:
-            return
+            return comp
         if phase != last_phase:
             log(f"phase={phase}; waiting")
             if phase in {"lobby", "countdown", "waiting"}:
                 await state.thoughts.say(f"Ready and waiting ({phase}).", force=True)
             last_phase = phase
-        await asyncio.sleep(0.4 if phase == "countdown" else 0.8)
+        await asyncio.sleep(0.25 if phase == "countdown" else 0.5)
+    return {}
+
+
+def _quiet(fn: Any, *args: Any) -> Any:
+    try:
+        return fn(*args)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +439,7 @@ async def solve_text(state: RunState, box: BlackBox) -> str:
             return "switch"
         return f"error: {err}"
     challenge = res["dict"]
+    state.record.setdefault("startup", {})["challenge"] = round(time.monotonic() - PROC_T0, 2)
     clock = Clock(float(challenge.get("time_remaining_s") or 0), float(challenge.get("max_time_s") or 0))
     description = str(challenge.get("description") or "")
     rules = str(challenge.get("rules") or "")
@@ -899,6 +931,23 @@ class FastSubmit:
     def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            self._task = None
+
+    def get_json(self, path: str) -> dict[str, Any]:
+        resp = self.session.get(f"{self.base}{path}", timeout=8)
+        if resp.status_code >= 400:
+            raise ArenaAPIError(resp.status_code, resp.text)
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
+
+    def lookup_modality(self, agent_id: str) -> str:
+        """This agent's assignment from its session ("text", "image", or "")."""
+        try:
+            data = self.get_json(f"/api/session/{quote(agent_id, safe='')}")
+        except Exception:
+            return ""
+        kind = str(data.get("challenge_type") or "").lower()
+        return kind if kind in {"text", "image"} else ""
 
     def submit(self, agent_id: str, answer: str, metrics: dict[str, Any]) -> dict[str, Any]:
         resp = self.session.post(f"{self.base}/api/submit", json={"agent_id": agent_id, "answer": answer, "client_metrics": metrics}, timeout=60)
@@ -967,6 +1016,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             return "switch"
         return f"error: {err}"
     ch = res["dict"]
+    state.record.setdefault("startup", {})["challenge"] = round(time.monotonic() - PROC_T0, 2)
     clock = Clock(float(ch.get("time_remaining_s") or 0), float(ch.get("max_time_s") or 0))
     prompt = str(ch.get("prompt") or ch.get("edit_prompt") or "")
     notes = str(ch.get("reference_notes") or "")

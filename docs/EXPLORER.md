@@ -145,12 +145,19 @@ pro; pro never finished, and the 15 s preference window wasted ~15 s per image
 run. Round 5: fast image models first (flash-lite, flash, mini, then pro), 3 s
 preference window, warm REST and proxy connections, stronger no-text and
 minimal-edit prompts.
+Practice round 5: all 5 accepted, average 92.8 (logic 98.9, 98.45, 97.85;
+image edit 85.85, generate 83.2). The model now answers ~3 s after the
+challenge, yet the server reported 8.2 to 8.4 s: Practice starts the speed
+clock at registration, so setup after registering counted. Round 6: MCP
+inventory, model roster and warm connections happen before registering;
+after registering only the GO check (warm session), a parallel modality
+lookup, and the challenge call remain. Run records now carry startup marks.
 
-Verified here: all 12 mock scenarios pass (easy logic, ordering puzzle,
+Verified here: all 13 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image
 generate, slow LLM against a 30 s limit, model without tool calling, slow
 primary model, wrong primary model settled by a tie-breaker, oversized image
-retried with the next model, preferred image model returning no image); 21 unit tests; kit tests for model selection and
+retried with the next model, preferred image model returning no image, lobby then GO); 21 unit tests; kit tests for model selection and
 packaging; packager `--check` passes; the unpacked tarball runs with a clean
 environment and no `.env`.
 

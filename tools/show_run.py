@@ -48,6 +48,8 @@ def show(path: Path) -> None:
     for a in r.get("llm_attempts", []):
         print(f"  llm t={a.get('t')}s {a.get('model')} {a.get('ms')}ms finish={a.get('finish')} "
               f"tokens={a.get('tokens')} err={a.get('error') or '-'} answer={a.get('answer')!r}")
+    if r.get("startup"):
+        print("startup (s from process start):", json.dumps(r["startup"]))
     if r.get("timeline"):
         print("timeline (s from challenge):", json.dumps(r["timeline"]))
     for c in r.get("calls", [])[:30]:
