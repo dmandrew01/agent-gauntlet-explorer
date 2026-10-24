@@ -57,6 +57,10 @@ from .react import ReactAgent
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORE_KINDS = {"challenge", "clue_list", "clue_get", "timer", "broadcast", "submit",
               "image_edit", "image_generate", "image_analyze"}
+# Seconds to wait for the partner model after the primary answered. Practice
+# showed the primary right 3/3 while each waited second cost ~1.7 speed points
+# on a 60 s puzzle, so the default is no wait.
+CONFIRM_WAIT_S = float(os.getenv("GAUNTLET_CONFIRM_WAIT_S", "0") or 0)
 LOCK_WORDS = ("locked", "waiting for organizer", "not started", "lobby", "not running", "countdown")
 
 
@@ -356,9 +360,6 @@ def _metrics(state: RunState, total_time_ms: int) -> dict[str, Any]:
     usage = state.llm.usage if state.llm else None
     prompt = usage.prompt_tokens if usage else 0
     completion = usage.completion_tokens if usage else 0
-    proxy = _fetch_proxy_usage(state)
-    if proxy:
-        prompt, completion = proxy.get("prompt_tokens", prompt), proxy.get("completion_tokens", completion)
     return {
         "model_name": state.model_used,
         "total_tokens": str(prompt + completion),
@@ -447,7 +448,6 @@ async def solve_text(state: RunState, box: BlackBox) -> str:
 
     await state.thoughts.say("Answer checked against the rules. Submitting.", force=True)
     await state.thoughts.detail(f"Final answer: {answer[:120]}")
-    await state.thoughts.flush(timeout=2.0)
     total_ms = int(clock.elapsed() * 1000)
     state.record.setdefault("timeline", {})["submit_start"] = round(clock.elapsed(), 1)
     result = await _submit_text(state, answer, total_ms)
@@ -684,7 +684,10 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
             if not done:
                 log("second model too slow; deciding with what arrived")
                 break
-            for task in done:
+            # Also take any answer that finished meanwhile (costs no waiting).
+            finished = set(done) | {t for t in pending if t.done()}
+            pending -= finished
+            for task in finished:
                 try:
                     answer, _finish = task.result()
                 except Exception as exc:
@@ -693,15 +696,26 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
                 if answer:
                     got[tasks[task]] = answer
                     await _draft(state, answer, f"direct solve with {tasks[task]}")
+            if primary in got and partner not in got:
+                for task in [t for t in pending if t.done()]:
+                    pending.discard(task)
+                    try:
+                        late, _ = task.result()
+                    except Exception:
+                        late = ""
+                    if late:
+                        got[tasks[task]] = late
             if primary in got and partner in got:
                 break
+            if primary in got and CONFIRM_WAIT_S <= 0:
+                break  # calibrated primary answered: submit now (speed is 15% of score)
             if got and soft_deadline is None:
                 # One answer is in. Give the other a bounded window: longer when the
                 # trusted primary is the one still thinking.
                 if primary not in got:
                     window = min(clock.left() * 0.3, 15.0) if tight else min(clock.left() * 0.45, 30.0)
                 else:
-                    window = min(clock.left() * 0.25, 8.0) if tight else min(clock.left() * 0.3, 12.0)
+                    window = min(clock.left() * 0.25, CONFIRM_WAIT_S)
                 soft_deadline = time.monotonic() + max(4.0, window)
         for task in pending:
             task.cancel()
@@ -922,8 +936,10 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
                 report = pngtools.inspect_image(data)
                 log(f"input image: {report.get('format')} {report.get('width')}x{report.get('height')}")
         analyzer = box.find("image_analyze") or next(iter(box.by_kind("image_analyze")), None)
-        if input_uri and analyzer and clock.left() > 0.55 * clock.max_time_s:
-            extra = build_image_tool_arguments(list(_raw_defs(box)), analyzer.name, selected_model="", llm_api_key=state.api_key, arena_api_key=state.api_key)
+        use_analyze = os.getenv("GAUNTLET_IMAGE_ANALYZE", "0").lower() in {"1", "true", "yes"}
+        if use_analyze and input_uri and analyzer and clock.left() > 0.55 * clock.max_time_s:
+            extra = build_image_tool_arguments(list(_raw_defs(box)), analyzer.name, selected_model=ranked[0] if ranked else "",
+                                               llm_api_key=state.api_key, arena_api_key=state.api_key)
             state.record.setdefault("timeline", {})["analyze_start"] = round(clock.elapsed(), 1)
             ares = await box.call(analyzer.name, {"image_uri": input_uri, "question": (
                 "Describe this image precisely: subjects, layout, colors, lighting, style, any text. "
@@ -943,7 +959,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             plan = alt[0].name if alt else ""
         output_uri = ""
         errors = []
-        for model in (ranked[:3] or [""]):
+        for model in (produced.get("models") or ranked[:3] or [""]):
             if not plan or clock.left() < 12:
                 break
             extra = build_image_tool_arguments(list(_raw_defs(box)), plan, selected_model=model, llm_api_key=state.api_key, arena_api_key=state.api_key)
@@ -967,6 +983,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             errors.append(f"{model}: {r.get('error') or (r.get('dict') or {}).get('error') or 'no image returned'}")
             log(f"image attempt failed: {errors[-1][:200]}")
         produced["uri"], produced["plan"] = output_uri, plan
+        produced["model"] = state.model_used
 
     try:
         await asyncio.wait_for(_produce(), timeout=max(1.0, clock.left()))
@@ -983,27 +1000,31 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
     if not output_uri:
         return "no-image"
 
-    total_ms = int(clock.elapsed() * 1000)
-    state.record.setdefault("timeline", {})["submit_start"] = round(clock.elapsed(), 1)
-    metrics = _metrics(state, total_ms)
-    metrics["planner_tool"] = plan
-    await state.thoughts.say("Submitting the image.", force=True)
+    submit_errors: list[str] = state.record.setdefault("image_submit_errors", [])
+    result = await _submit_image(state, box, output_uri, plan, clock, submit_errors)
+    # A failed submit (for example an image too large for transport) gets one more
+    # try with the next image model while time allows.
+    used = str(produced.get("model") or "")
+    if result is None and output_uri != input_uri and clock.left() > 25:
+        others = [m for m in ranked if m != used][:1]
+        if others:
+            log(f"retrying the image with {others[0]} after submit failure")
+            produced["models"] = others
+            produced["uri"] = ""
+            try:
+                await asyncio.wait_for(_produce(), timeout=max(1.0, clock.left() - 5))
+            except Exception as exc:
+                log(f"image retry failed: {type(exc).__name__}: {exc}")
+            if produced.get("uri"):
+                output_uri = str(produced["uri"])
+                result = await _submit_image(state, box, output_uri, plan, clock, submit_errors)
+    if result is None and input_uri and output_uri != input_uri:
+        log("submitting the input image as the last resort")
+        output_uri = input_uri
+        result = await _submit_image(state, box, output_uri, plan, clock, submit_errors)
     await state.thoughts.flush()
-    submit = box.find("arena.image.submit_edit")
-    result: Any = None
-    if submit:
-        r = await box.call(submit.name, {"edited_image": output_uri, "client_metrics": metrics, "rationale": "gauntlet explorer image flow",
-                                         "agent_id": state.agent_id}, source="submit", mine=False, timeout_s=60)
-        if not r.get("error"):
-            result = r.get("dict")
-        else:
-            log(f"MCP image submit failed: {r['error'][:200]}")
     if result is None:
-        try:
-            result = await asyncio.to_thread(state.http.submit, state.agent_id, output_uri, metrics, "image")
-        except Exception as exc:
-            log(f"REST image submit failed: {exc}")
-            return "submit-failed"
+        return "submit-failed"
     for line in submission_summary_lines(result):
         log(line)
     log(f"image {save_submitted_image(state.agent_id, output_uri, REPO_ROOT)}")
@@ -1011,6 +1032,40 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
     state.record["result"] = {"accepted": result.get("accepted") if isinstance(result, dict) else getattr(result, "accepted", None),
                               "score": {k: v for k, v in (score or {}).items() if k != "output_image_uri"} if isinstance(score, dict) else score}
     return "submitted"
+
+
+async def _submit_image(state: RunState, box: BlackBox, uri: str, plan: str, clock: Clock, errors: list[str]) -> Any:
+    """MCP submit, then REST. Returns the result, or None with the reasons in ``errors``."""
+    state.record.setdefault("timeline", {})["submit_start"] = round(clock.elapsed(), 1)
+    state.record["image_bytes"] = len(uri)
+    log(f"submitting image: {len(uri) / 1e6:.2f} MB as text ({uri[:30]}...)")
+    metrics = _metrics(state, int(clock.elapsed() * 1000))
+    metrics["planner_tool"] = plan
+    await state.thoughts.say("Submitting the image.", force=True)
+    submit = box.find("arena.image.submit_edit")
+    if submit:
+        r = await box.call(submit.name, {"edited_image": uri, "client_metrics": metrics, "rationale": "gauntlet explorer image flow",
+                                         "agent_id": state.agent_id}, source="submit", mine=False, timeout_s=90)
+        if not r.get("error"):
+            state.record["timeline"]["submit_done"] = round(clock.elapsed(), 1)
+            return r.get("dict")
+        errors.append(f"mcp: {str(r['error'])[:400]}")
+        log(f"MCP image submit failed: {str(r['error'])[:300]}")
+        if "409" in str(r["error"]) or "already" in str(r["error"]).lower():
+            return {"accepted": None, "status": "already-submitted", "score": None}
+    try:
+        result = await asyncio.to_thread(state.http.submit, state.agent_id, uri, metrics, "image")
+        state.record["timeline"]["submit_done"] = round(clock.elapsed(), 1)
+        return result
+    except ArenaAPIError as exc:
+        errors.append(f"rest: HTTP {exc.status_code}: {exc.message[:400]}")
+        log(f"REST image submit failed: HTTP {exc.status_code}: {exc.message[:300]}")
+        if exc.status_code == 409:
+            return {"accepted": None, "status": "already-submitted", "score": None}
+    except Exception as exc:
+        errors.append(f"rest: {type(exc).__name__}: {str(exc)[:400]}")
+        log(f"REST image submit failed: {exc}")
+    return None
 
 
 def _raw_defs(box: BlackBox) -> list[Any]:

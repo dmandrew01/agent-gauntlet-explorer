@@ -72,8 +72,19 @@ def _uri(png: bytes) -> str:
 
 
 INPUT_IMAGE = _uri(_png(32, 24, lambda x, y: (70, 130, 220) if y < 12 else (40, 160, 60)))
+BIG_EDITED_IMAGE = ""  # set after EDITED_IMAGE below
 GENERATED_IMAGE = _uri(_png(24, 24, lambda x, y: (20, 30, 80) if y < 14 else (30, 90, 140)))
+# A bigger edit, like a high-resolution "pro" model returns: same picture plus
+# an incompressible text chunk, so it is still a valid PNG.
+def _big(uri: str, extra: int = 300_000) -> str:
+    png = base64.b64decode(uri.split(",", 1)[1])
+    body = b"Comment\x00" + base64.b64encode(random.Random(7).randbytes(extra))
+    chunk = struct.pack(">I", len(body)) + b"tEXt" + body + struct.pack(">I", zlib.crc32(b"tEXt" + body) & 0xFFFFFFFF)
+    return _uri(png[:-12] + chunk + png[-12:])
+
+
 EDITED_IMAGE = _uri(_png(32, 24, lambda x, y: (240, 140, 40) if y < 12 else (40, 160, 60)))
+BIG_EDITED_IMAGE = _big(EDITED_IMAGE)
 
 # ---------------------------------------------------------------------------
 # Scenarios
@@ -245,7 +256,7 @@ async def draft(request: Request) -> JSONResponse:
 def score(sess: Session, answer: str) -> dict[str, Any]:
     expected = sess.payload["expected"]
     if sess.modality == "image":
-        correct = answer == (GENERATED_IMAGE if sess.scenario == "image_generate" else EDITED_IMAGE)
+        correct = answer in ((GENERATED_IMAGE,) if sess.scenario == "image_generate" else (EDITED_IMAGE, BIG_EDITED_IMAGE))
     else:
         correct = answer.strip() == expected
     missing = [t for t in sess.payload.get("required_tools", []) if t not in sess.tools_used]
@@ -301,8 +312,10 @@ MODELS = [
     {"id": "mock/qwen3.7-plus"},
     {"id": "mock/nemotron-3-ultra"},
     {"id": "mock/fast-mini"},
+    {"id": "mock/painter-pro-image", "capabilities": ["image"]},
     {"id": "mock/painter-image", "capabilities": ["image"]},
 ]
+MAX_IMAGE_CHARS = int(os.getenv("MOCK_MAX_IMAGE_CHARS", "100000000"))
 # Test knobs: one model answers slowly or wrongly.
 SLOW_MODEL = os.getenv("MOCK_SLOW_MODEL", "")
 SLOW_S = float(os.getenv("MOCK_SLOW_S", "0") or 0)
@@ -528,6 +541,8 @@ def image_submit(edited_image: str, agent_id: str, client_metrics: dict | None =
     sess = _track(agent_id, "arena.image.submit_edit")
     if not sess:
         return {"error": "Agent not registered"}
+    if len(edited_image) > MAX_IMAGE_CHARS:
+        return {"error": f"payload too large: {len(edited_image)} chars"}
     result, code = _submit(sess, edited_image)
     if code != 200:
         return {"error": "already submitted"}
@@ -539,17 +554,19 @@ def image_submit(edited_image: str, agent_id: str, client_metrics: dict | None =
 @mcp.tool(name="image_edit", description="Edit an image with an image model. Returns image_uri.")
 def image_edit(image_uri: str, prompt: str, agent_id: str, model: str = "") -> dict:
     _track(agent_id, "image_edit")
-    if model and model != "mock/painter-image":
+    if model and model not in {"mock/painter-image", "mock/painter-pro-image"}:
         return {"error": f"model {model} is not image-capable"}
     if "orange" not in prompt.lower():
         return {"image_uri": INPUT_IMAGE, "model": model}
+    if model == "mock/painter-pro-image":
+        return {"image_uri": BIG_EDITED_IMAGE, "model": model}
     return {"image_uri": EDITED_IMAGE, "model": model or "mock/painter-image"}
 
 
 @mcp.tool(name="image_generate", description="Generate an image from a prompt. Returns image_uri.")
 def image_generate(prompt: str, agent_id: str, model: str = "") -> dict:
     _track(agent_id, "image_generate")
-    if model and model != "mock/painter-image":
+    if model and model not in {"mock/painter-image", "mock/painter-pro-image"}:
         return {"error": f"model {model} is not image-capable"}
     return {"image_uri": GENERATED_IMAGE, "model": model or "mock/painter-image"}
 

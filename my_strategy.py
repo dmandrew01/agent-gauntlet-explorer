@@ -9,6 +9,7 @@ the better model ranking for free.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from base_strategy import BaseStrategy, ChallengeContext
@@ -100,6 +101,24 @@ class MyStrategy(BaseStrategy):
         elif "hard" in (ctx.difficulty or "").lower() and ctx.max_time_s >= 120:
             max_tokens = 12288
         return {"temperature": float(self.text_temperature), "max_tokens": int(max_tokens)}
+
+    def build_image_prompt(self, ctx: ChallengeContext) -> str:
+        """Kit prompt plus explicit constraints. The image judge scores constraint
+        compliance separately; Practice docked a poster to 70 on that axis."""
+        base = super().build_image_prompt(ctx)
+        text = f"{ctx.rules} {ctx.description}".lower()
+        extras = []
+        if re.search(r"\bno (visible )?(text|words|letters|typography|lettering)\b|avoid[^.]{0,40}\b(text|logo|watermark)|without (any )?text", text):
+            extras.append("Absolutely no text of any kind anywhere in the image: no letters, words, numbers, "
+                          "signage, captions, labels, logos, brand marks, or watermarks. Surfaces that would carry "
+                          "text (signs, screens, posters) stay blank or abstract.")
+        if ctx.image_url:
+            extras.append("Change only what the instruction asks for. Keep everything else identical to the input "
+                          "image: subject identity, facial features, pose, camera angle, framing, background, "
+                          "lighting, and colors. No style transfer, no added or removed objects.")
+        if re.search(r"single (coherent )?scene|clean composition", text):
+            extras.append("One coherent scene with one clear focal subject and a clean composition.")
+        return base + ("\n\n" + "\n".join(extras) if extras else "")
 
     def on_time_warning(self, remaining_s: float, current_answer: str, ctx: ChallengeContext) -> str | None:
         return current_answer or None

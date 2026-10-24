@@ -53,9 +53,11 @@ Routing per run:
 
 - **Direct** (most logic puzzles): the top-ranked model and a fast partner
   from another family answer in parallel with clues, decoded findings and
-  tool evidence. Agreement submits at once. A slow primary gets a bounded
-  wait (15 s on 60 s puzzles), then the partner's answer goes in. On
-  disagreement a third model breaks the tie when time allows.
+  tool evidence. The primary's answer goes in the moment it arrives (Practice:
+  right 3 of 3, and each waited second costs about 1.7 speed points on a 60 s
+  puzzle). A slow primary gets a bounded wait (15 s on 60 s puzzles) once the
+  partner has answered, then the partner's answer goes in. When both arrive
+  together and disagree, a third model breaks the tie.
 - **Agentic**: when the challenge names extra tools, points at hidden ones,
   asks for exploration or fresh data, or the direct call fails. Probes leads
   for up to 20% of the remaining time, then runs the reason-act loop.
@@ -112,19 +114,27 @@ python tools/package_explorer.py --agent-name "AHGroup" --force
 | `GAUNTLET_TOOL_RESULT_CHARS` | 2500 | Tool output size fed back to the LLM |
 | `GAUNTLET_LOBBY_WAIT_S` | 3600 | Max lobby wait |
 | `GAUNTLET_HEDGE` | on | Race two models from different families on direct solves; a third breaks ties |
+| `GAUNTLET_CONFIRM_WAIT_S` | 0 | Seconds to wait for the partner after the primary answers (0 = submit at once) |
+| `GAUNTLET_IMAGE_ANALYZE` | off | Describe the input image with image_analyze before editing |
 | `GAUNTLET_THOUGHTS` | private | `verbose` adds answers, models and tool output to broadcast thoughts (other Practice teams see them) |
 | `GAUNTLET_BLACKBOX_TIME_S` | 300 | Budget when the server has no timer |
 
 ## Verified, and not yet
 
-First Practice run (5 puzzles, before racing): image edit 86.75 and 86.05,
-image generate 90.0, logic hard 98.75, logic easy 34.1 (slow, wrong model
-pick on a 60 s limit). Racing and roster priors target that last case.
+Practice round 1 (before racing): image edit 86.75 and 86.05, image generate
+90.0, logic hard 98.75, logic easy 34.1 (slow, wrong model on a 60 s limit).
+Practice round 2 (racing + calibration): logic medium 97.55, logic easy 95.75,
+logic hard 98.15, image generate 83.9 (constraints 70: text in a no-text
+poster), image edit not scored (submit failed after the edit). Round 3 fixes:
+no confirmation wait, no pre-submit network calls, explicit no-text and
+preserve-everything image prompts, image submit fallback (REST, then the next
+image model, then the input image).
 
-Verified here: all 10 mock scenarios pass (easy logic, ordering puzzle,
+Verified here: all 11 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image
 generate, slow LLM against a 30 s limit, model without tool calling, slow
-primary model, wrong primary model settled by a tie-breaker); 21 unit tests; kit tests for model selection and
+primary model, wrong primary model settled by a tie-breaker, oversized image
+retried with the next model); 21 unit tests; kit tests for model selection and
 packaging; packager `--check` passes; the unpacked tarball runs with a clean
 environment and no `.env`.
 

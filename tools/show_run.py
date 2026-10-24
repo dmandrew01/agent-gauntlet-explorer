@@ -4,6 +4,7 @@
     python tools/show_run.py 3          # outputs/<AGENT_ID>-run-3.json
     python tools/show_run.py 1 2 3 4 5
     python tools/show_run.py            # latest outputs/<AGENT_ID>-run.json
+    python tools/show_run.py 2 --inventory   # also print the server's tool list
 """
 
 from __future__ import annotations
@@ -49,15 +50,25 @@ def show(path: Path) -> None:
               f"tokens={a.get('tokens')} err={a.get('error') or '-'} answer={a.get('answer')!r}")
     if r.get("timeline"):
         print("timeline (s from challenge):", json.dumps(r["timeline"]))
-    for c in r.get("calls", [])[:20]:
-        print(f"  tool {c.get('name')} {c.get('elapsed_ms')}ms ok={c.get('ok')}")
+    for c in r.get("calls", [])[:30]:
+        line = f"  tool {c.get('name')} {c.get('elapsed_ms')}ms ok={c.get('ok')}"
+        if not c.get("ok"):
+            line += f" args={json.dumps(c.get('args'))[:160]} -> {str(c.get('summary'))[:300]}"
+        print(line)
+    if r.get("image_bytes"):
+        print(f"submitted image size: {r['image_bytes'] / 1e6:.2f} MB as text")
+    for err in r.get("image_submit_errors", []):
+        print(f"  image submit error: {err[:400]}")
+    if "--inventory" in sys.argv:
+        print(r.get("inventory", ""))
     print(f"thoughts={r.get('thoughts')} llm_usage={r.get('llm_usage')}")
 
 
 def main() -> int:
     aid = agent_id()
     out = ROOT / "outputs"
-    paths = [out / f"{aid}-run-{n}.json" for n in sys.argv[1:]] or [out / f"{aid}-run.json"]
+    nums = [a for a in sys.argv[1:] if not a.startswith("--")]
+    paths = [out / f"{aid}-run-{n}.json" for n in nums] or [out / f"{aid}-run.json"]
     for path in paths:
         if path.exists():
             show(path)

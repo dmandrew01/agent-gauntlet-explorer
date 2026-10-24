@@ -71,7 +71,8 @@ def main() -> int:
         plan.append(("text_logic", {"MOCK_LLM_DELAY_S": "40", "MOCK_LOGIC_TIME_S": "30"}, {}))
         plan.append(("blackbox", {}, {"GAUNTLET_PROBE": "0", "GAUNTLET_MODEL_PREFERENCE": "mock/fast-mini"}))
         plan.append(("text_logic", {"MOCK_SLOW_MODEL": "mock/gemini-3.8-flash", "MOCK_SLOW_S": "45"}, {"_label": "primary model slow"}))
-        plan.append(("text_logic", {"MOCK_WRONG_MODEL": "mock/gemini-3.8-flash"}, {"_label": "primary model wrong, tie-break"}))
+        plan.append(("text_logic", {"MOCK_WRONG_MODEL": "mock/gemini-3.8-flash"}, {"GAUNTLET_CONFIRM_WAIT_S": "5", "_label": "primary wrong, confirm wait on, tie-break"}))
+        plan.append(("image_edit", {"MOCK_MAX_IMAGE_CHARS": "200000"}, {"_label": "pro image too large, retry other model"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()

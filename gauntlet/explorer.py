@@ -681,6 +681,8 @@ class BlackBox:
         parsed = await self._raw_call(name, args, timeout_s)
         err_text = str(parsed.get("exception") or (parsed.get("text") if parsed.get("is_error") else "") or "").lower()
         if err_text and "agent_id" in err_text:
+            self.calls.append(CallRecord(name, _redact(args), False, int(parsed.get("elapsed_ms", 0)),
+                                         f"ERROR (retried) {err_text[:280]}"))
             if re.search(r"(unexpected|extra|not permitted|additional)", err_text) and "agent_id" in args:
                 args.pop("agent_id")
                 parsed = await self._raw_call(name, args, timeout_s)
