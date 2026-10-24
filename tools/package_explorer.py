@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Package the Gauntlet Explorer with the kit's own packager and self-check.
 
-    set -a; . ./.env; set +a
     python tools/package_explorer.py --agent-name "AHGroup"          # first build
     python tools/package_explorer.py --agent-name "AHGroup" --force  # rebuild
 
@@ -22,6 +21,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from arena_clients import package  # noqa: E402
+
+try:  # read AGENT_ID from .env so no shell export step is needed (Windows too)
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
 
 ENTRYPOINT = "examples/explorer/agent.py"
 

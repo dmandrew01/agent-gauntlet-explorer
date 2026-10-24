@@ -8,7 +8,23 @@ Team id (`AGENT_ID`): `dmandrew01`. Team name: `AHGroup` (set in
 through event day; the server rejects a second registration under a different
 name.
 
-## 1. Get the code and install
+## Windows with PyCharm (recommended setup)
+
+1. Install Python 3.12 from https://www.python.org/downloads/windows/
+   (64-bit installer). Tick "Add python.exe to PATH" on the first screen.
+2. Install Git from https://git-scm.com/download/win (defaults are fine).
+3. Install PyCharm (free) from https://www.jetbrains.com/pycharm/download/
+4. In PyCharm: Clone Repository, choose GitHub, log in as dmandrew01, pick
+   `agent-gauntlet-explorer`, Clone.
+5. Settings, Project, Python Interpreter, Add Interpreter, Add Local
+   Interpreter, Virtualenv, New, base interpreter Python 3.12, location
+   `.venv` inside the project. OK.
+6. Open the Terminal tab at the bottom (Alt+F12). The prompt starts with
+   `(.venv)`. Every command in this guide runs there. Differences from the
+   Linux commands: use `copy .env.example .env` instead of `cp`, and skip
+   `source .venv/bin/activate` (PyCharm activates it for you).
+
+## 1. Get the code and install (Linux, macOS, or WSL)
 
 ```bash
 git clone https://github.com/dmandrew01/agent-gauntlet-explorer.git
@@ -97,9 +113,10 @@ PASS or FAIL for each.
 ## 7. Package
 
 ```bash
-set -a; . ./.env; set +a
 python tools/package_explorer.py --agent-name "AHGroup" --force
 ```
+
+The script reads `AGENT_ID` from `.env`.
 
 Expect two `PASS` lines. Output:
 

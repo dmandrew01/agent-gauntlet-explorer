@@ -419,6 +419,20 @@ class ReactAgent:
 _PY_DENY = re.compile(r"(/proc|environ|os\.system|subprocess|socket|urllib|requests|http\.client|shutil\.rmtree|ctypes|__import__\(['\"]os)")
 
 
+def _child_env() -> dict[str, str]:
+    """Minimal environment for model-written code: no API keys, no tokens.
+
+    Windows needs SYSTEMROOT for Python to start, so it is kept there.
+    """
+    env = {"PATH": "/usr/bin:/bin", "PYTHONHASHSEED": "0"}
+    if os.name == "nt":
+        env = {"PATH": os.environ.get("SYSTEMROOT", r"C:\Windows"), "PYTHONHASHSEED": "0"}
+        for name in ("SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP"):
+            if os.environ.get(name):
+                env[name] = os.environ[name]
+    return env
+
+
 def run_python(code: str, timeout_s: float = 8.0) -> str:
     """Run model-written code in an isolated interpreter with a scrubbed environment."""
     if not code.strip():
@@ -433,7 +447,7 @@ def run_python(code: str, timeout_s: float = 8.0) -> str:
                 text=True,
                 timeout=timeout_s,
                 cwd=tmp,
-                env={"PATH": "/usr/bin:/bin", "PYTHONHASHSEED": "0"},
+                env=_child_env(),
             )
         except subprocess.TimeoutExpired:
             return f"error: timed out after {timeout_s:.0f}s"
