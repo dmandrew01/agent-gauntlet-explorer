@@ -949,6 +949,46 @@ class BlackBox:
                     return True
         return False
 
+    def catalog_tools(self) -> list[ToolInfo]:
+        """Listed tools whose job is to describe other tools (e.g. arena.tools.list)."""
+        rx = re.compile(r"(tools?[._\-]?(list|catalog|index|manifest|discover|available|help)|"
+                        r"(list|discover|describe)[._\-]?tools?|catalog|manifest|capabilit)", re.I)
+        return [t for t in self.tools.values() if rx.search(t.name) and t.kind not in NEVER_AUTO_CALL and not t.destructive]
+
+    async def discover_catalog(self, timeout_s: float = 4.0) -> list[str]:
+        """Call catalog tools once and register any tools they reveal.
+
+        Returns the names of tools that were not in list_tools. The calls are
+        cheap and side-effect free by intent, so the controller runs them in
+        parallel with clue fetching.
+        """
+        revealed: list[str] = []
+        for tool in self.catalog_tools()[:2]:
+            if f"catalog:{tool.name}" in self._probed:
+                continue
+            self._probed.add(f"catalog:{tool.name}")
+            args = synthesize_args(tool, self.ctx)
+            if args is None:
+                continue
+            res = await self.call(tool.name, args, source="catalog", timeout_s=timeout_s)
+            if res.get("error"):
+                continue
+            self.notebook.add(f"catalog:{tool.name}", compat.short(res.get("dict") or res.get("text"), 1500), "discovery")
+            for item in _tool_entries(res.get("data") if res.get("data") is not None else res.get("dict")):
+                name = str(item.get("name") or item.get("tool") or item.get("id") or "").strip()
+                if not name or name in self.tools:
+                    continue
+                desc = str(item.get("description") or item.get("desc") or item.get("summary") or "")
+                schema = item.get("input_schema") or item.get("inputSchema") or item.get("parameters") or item.get("schema") or {}
+                if not isinstance(schema, dict):
+                    schema = {}
+                self.tools[name] = ToolInfo(name, desc or "tool revealed by a catalog tool", schema, classify(name, desc), listed=False)
+                revealed.append(name)
+                self.notebook.add("discovery", f"Catalog revealed unlisted tool: {self.tools[name].brief()}", "discovery")
+                if name in self.notebook.hidden_tool_candidates:
+                    self.notebook.hidden_tool_candidates.remove(name)
+        return revealed
+
     def call_log_text(self, limit: int = 25) -> str:
         rows = self.calls[-limit:]
         return "\n".join(f"{r.name}({compat.short(r.args, 120)}) -> {r.summary}" for r in rows)
@@ -963,4 +1003,30 @@ def _redact(args: dict[str, Any]) -> dict[str, Any]:
             out[k] = "<redacted>"
         else:
             out[k] = v
+    return out
+
+
+def _tool_entries(data: Any) -> list[dict[str, Any]]:
+    """Find tool-like dicts (each with a name) anywhere in a catalog payload."""
+    out: list[dict[str, Any]] = []
+
+    def walk(node: Any, depth: int) -> None:
+        if depth > 4 or len(out) > 200:
+            return
+        if isinstance(node, list):
+            for item in node:
+                if isinstance(item, str) and re.fullmatch(r"[A-Za-z_][\w.\-]{2,63}", item) and ("." in item or "_" in item):
+                    out.append({"name": item})
+                else:
+                    walk(item, depth + 1)
+        elif isinstance(node, dict):
+            if isinstance(node.get("name"), str) and (
+                "description" in node or "input_schema" in node or "inputSchema" in node or "parameters" in node
+            ):
+                out.append(node)
+                return
+            for value in node.values():
+                walk(value, depth + 1)
+
+    walk(data, 0)
     return out

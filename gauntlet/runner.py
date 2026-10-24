@@ -497,12 +497,21 @@ async def _solve_text_body(state: RunState, box: BlackBox, challenge: dict[str, 
     rules = str(challenge.get("rules") or "")
     # Clues and required tools, in parallel.
     clue_task = asyncio.create_task(_fetch_clues(box, state.agent_id))
+    catalog_task = asyncio.create_task(box.discover_catalog())
     required = _clean_list(challenge.get("required_tools"))
     blob = f"{challenge.get('challenge_type', '')} {description} {rules} {_extra_text(challenge)}".lower()
     for name in box.tools:
         if name.lower() in blob and name not in required and box.tools[name].kind not in NEVER_AUTO_CALL:
             required.append(name)
     fetched = await clue_task
+    try:  # the catalog may reveal hidden tools; never wait long for it
+        revealed = await asyncio.wait_for(asyncio.shield(catalog_task), timeout=1.0)
+        if revealed:
+            log(f"catalog revealed unlisted tools: {revealed}")
+        state.record["catalog"] = [f.text[:1500] for f in box.notebook.facts if f.source.startswith("catalog:")][:2]
+        state.record["catalog_revealed"] = revealed
+    except Exception:
+        pass
     clues = fetched or work["clues"]
     work["clues"] = clues
     box.ctx.challenge_text = description or (clues[0] if clues else "")

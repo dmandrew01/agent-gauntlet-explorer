@@ -116,6 +116,17 @@ class ExplorerTests(unittest.TestCase):
         self.assertIn("ORION", hints.keys)
 
 
+class CatalogTests(unittest.TestCase):
+    def test_tool_entries(self) -> None:
+        from gauntlet.explorer import _tool_entries
+
+        payload = {"tools": [{"name": "vault.open", "description": "x", "input_schema": {}}, {"name": "a.b", "description": ""}],
+                   "note": "ok"}
+        self.assertEqual([t["name"] for t in _tool_entries(payload)], ["vault.open", "a.b"])
+        self.assertEqual([t["name"] for t in _tool_entries({"available": ["arena.get_challenge", "hidden_tool"]})],
+                         ["arena.get_challenge", "hidden_tool"])
+
+
 class AnswerTests(unittest.TestCase):
     def test_extract(self) -> None:
         self.assertEqual(answer.extract_answer("<think>hmm ANSWER: no</think>\nANSWER: Bob\nbecause"), "Bob")

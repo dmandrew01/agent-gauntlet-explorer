@@ -35,7 +35,7 @@ The kit fixes the contract. The event blurb adds the black box.
 | Slow start after GO | MCP connected, inventory taken and model roster fetched during the lobby; GO polled every 0.4 to 0.8 s |
 | Unknown tools | `explorer.BlackBox.inventory` lists tools (paginated), resources, templates, prompts and server instructions |
 | Calling something dangerous | Token-based classifier; `submit`, `reset`, `register`, `delete`, `leaderboard` and destructive-annotated tools never run from probes or the LLM loop |
-| Hidden tools | Every result is mined for tool names in call phrases ("use vault.open"), backticks and dotted names; JSON field names are ignored; unlisted names get probed with any key found |
+| Hidden tools | Catalog tools (`arena.tools.list` and similar) run with the clue fetch and their entries join the inventory. Every result is mined for tool names in call phrases ("use vault.open"), backticks and dotted names; JSON field names are ignored; unlisted names get probed with any key found |
 | Encrypted data | `decoders.auto_decode`: beam search over base64/32/85, hex, binary, decimal, morse, URL, rot13, Caesar, Atbash, rot47, reverse, rail fence, single-byte XOR, zlib/gzip/bz2/lzma; Vigenere and repeating XOR with keys found elsewhere |
 | Data hidden in images | `pngtools.inspect_image`: PNG text chunks, bytes after IEND, LSB payloads, JPEG strings; stdlib only |
 | Server asks the client for things | Sampling requests answered through the proxy LLM; elicitation answered with schema-valid values; logs and notifications land in the notebook |
@@ -152,12 +152,18 @@ clock at registration, so setup after registering counted. Round 6: MCP
 inventory, model roster and warm connections happen before registering;
 after registering only the GO check (warm session), a parallel modality
 lookup, and the challenge call remain. Run records now carry startup marks.
+Practice round 6: all 5 accepted, average 95.8 (logic 99.2, 98.9, 99.5;
+image edit 88.55, generate 92.75). Server-measured time fell to 3.3 to 4.5 s
+on logic and about 7 s on images. Round 7: catalog tools such as
+`arena.tools.list` (present on Practice) run in parallel with clue fetching;
+tools they reveal join the inventory, so a hidden tool can be called by name
+with its schema.
 
-Verified here: all 13 mock scenarios pass (easy logic, ordering puzzle,
+Verified here: all 14 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image
 generate, slow LLM against a 30 s limit, model without tool calling, slow
 primary model, wrong primary model settled by a tie-breaker, oversized image
-retried with the next model, preferred image model returning no image, lobby then GO); 21 unit tests; kit tests for model selection and
+retried with the next model, preferred image model returning no image, lobby then GO, hidden tool revealed only by arena.tools.list); 21 unit tests; kit tests for model selection and
 packaging; packager `--check` passes; the unpacked tarball runs with a clean
 environment and no `.env`.
 

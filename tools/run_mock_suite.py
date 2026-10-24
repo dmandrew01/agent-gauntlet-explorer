@@ -75,6 +75,7 @@ def main() -> int:
         plan.append(("image_edit", {"MOCK_MAX_IMAGE_CHARS": "200000"}, {"GAUNTLET_IMAGE_MODEL_PREFERENCE": "mock/painter-pro-image", "GAUNTLET_IMAGE_HEDGE": "0", "_label": "pro image too large, retry other model"}))
         plan.append(("image_edit", {"MOCK_IMAGE_FLAKY_MODEL": "mock/painter-image"}, {"_label": "preferred image model returns no image"}))
         plan.append(("text_logic", {"MOCK_LOBBY_S": "3"}, {"_label": "lobby, then GO"}))
+        plan.append(("blackbox", {"MOCK_NO_NOTE": "1"}, {"GAUNTLET_PROBE": "0", "_label": "hidden tool only in arena.tools.list"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()

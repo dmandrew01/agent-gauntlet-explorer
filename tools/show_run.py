@@ -57,6 +57,9 @@ def show(path: Path) -> None:
         if not c.get("ok"):
             line += f" args={json.dumps(c.get('args'))[:160]} -> {str(c.get('summary'))[:300]}"
         print(line)
+    if r.get("catalog") is not None:
+        print("catalog (arena.tools.list etc.):", json.dumps(r.get("catalog"))[:1500])
+        print("catalog revealed:", r.get("catalog_revealed"))
     if r.get("image_bytes"):
         print(f"submitted image size: {r['image_bytes'] / 1e6:.2f} MB as text")
     for err in r.get("image_submit_errors", []):
