@@ -91,7 +91,6 @@ python tools/calibrate_models.py
 Package and self-check:
 
 ```bash
-set -a; . ./.env; set +a
 python tools/package_explorer.py --agent-name "AHGroup" --force
 # publish dist/<agent-id>-submission.tar.gz and .sha256 to a new public repo
 ```
