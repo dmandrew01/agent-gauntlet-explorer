@@ -958,16 +958,14 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             alt = box.by_kind("image_edit" if input_uri else "image_generate") or box.by_kind("image_generate")
             plan = alt[0].name if alt else ""
         output_uri = ""
-        errors = []
-        for model in (produced.get("models") or ranked[:3] or [""]):
-            if not plan or clock.left() < 12:
-                break
+        errors: list[str] = state.record.setdefault("image_errors", [])
+
+        async def attempt(model: str) -> str:
             extra = build_image_tool_arguments(list(_raw_defs(box)), plan, selected_model=model, llm_api_key=state.api_key, arena_api_key=state.api_key)
             base_args = synthesize_args(box.tools[plan], box.ctx) or {}
             args = {**base_args, "prompt": image_prompt, "agent_id": state.agent_id, **extra}
             if input_uri and box.tools[plan].kind == "image_edit":
                 args["image_uri"] = input_uri
-            await state.thoughts.say("Producing the image.")
             await state.thoughts.detail(f"{plan} with {model or 'default model'}")
             state.record.setdefault("timeline", {})[f"{plan}_start:{model}"] = round(clock.elapsed(), 1)
             r = await box.call(plan, args, source="image", timeout_s=max(10, clock.left() - 8))
@@ -977,11 +975,56 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
                 img = r["images"][0]
                 candidate = f"data:{img.get('mime') or 'image/png'};base64,{img.get('b64')}"
             if candidate and _valid_image_uri(candidate):
-                output_uri = candidate
-                state.model_used = model or state.model_used
-                break
-            errors.append(f"{model}: {r.get('error') or (r.get('dict') or {}).get('error') or 'no image returned'}")
+                return candidate
+            reason = r.get("error") or (r.get("dict") or {}).get("error") or (r.get("dict") or {}).get("text") or "no image returned"
+            errors.append(f"{model}: {str(reason)[:300]}")
             log(f"image attempt failed: {errors[-1][:200]}")
+            return ""
+
+        models = list(produced.get("models") or ranked[:3] or [""])
+        await state.thoughts.say("Producing the image.")
+        hedge = os.getenv("GAUNTLET_IMAGE_HEDGE", "1").lower() not in {"0", "false", "no"}
+        if plan and hedge and len(models) >= 2 and clock.left() > 25:
+            # Practice: the preferred image model often failed its first call after
+            # ~20 s. Run two models at once; prefer the first-ranked one when it
+            # lands within a short window after the other.
+            prefer_wait = float(os.getenv("GAUNTLET_IMAGE_PREFER_WAIT_S", "15"))
+            first, second = models[0], models[1]
+            tasks = {asyncio.create_task(attempt(m)): m for m in (first, second)}
+            got: dict[str, str] = {}
+            deadline: float | None = None
+            pending = set(tasks)
+            while pending:
+                wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+                done, pending = await asyncio.wait(pending, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    break
+                for task in done:
+                    try:
+                        uri = task.result()
+                    except Exception as exc:
+                        uri = ""
+                        errors.append(f"{tasks[task]}: {type(exc).__name__}: {exc}")
+                    if uri:
+                        got[tasks[task]] = uri
+                if first in got:
+                    break
+                if second in got and deadline is None:
+                    deadline = time.monotonic() + max(0.0, min(prefer_wait, clock.left() - 15))
+            for task in pending:
+                task.cancel()
+            chosen = first if first in got else (second if second in got else "")
+            if chosen:
+                output_uri = got[chosen]
+                state.model_used = chosen
+            models = models[2:]
+        for model in models:
+            if output_uri or not plan or clock.left() < 12:
+                break
+            uri = await attempt(model)
+            if uri:
+                output_uri = uri
+                state.model_used = model or state.model_used
         produced["uri"], produced["plan"] = output_uri, plan
         produced["model"] = state.model_used
 

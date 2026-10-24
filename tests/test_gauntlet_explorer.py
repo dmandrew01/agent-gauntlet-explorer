@@ -132,6 +132,12 @@ class AnswerTests(unittest.TestCase):
         spec = answer.infer_format("Answer yes or no.")
         self.assertEqual(answer.enforce("Yes, because the clues agree", spec)[0], "Yes")
 
+    def test_shared_prefix(self) -> None:
+        spec = answer.infer_format("Return only the final order as comma-separated team names.")
+        self.assertEqual(answer.enforce("Team Alpha, Team Bravo, Team Echo", spec)[0], "Alpha, Bravo, Echo")
+        self.assertEqual(answer.enforce("E3, E2, E5", spec)[0], "E3, E2, E5")
+        self.assertEqual(answer.enforce("New York, New Jersey", spec)[0], "New York, New Jersey")
+
     def test_invalid(self) -> None:
         for bad in ("", "unknown", "<toolcall>x", "Reasoning: x"):
             self.assertTrue(answer.is_invalid(bad))

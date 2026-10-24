@@ -91,6 +91,8 @@ class MyStrategy(BaseStrategy):
             f"Rules and output format:\n{ctx.rules.strip() or '(none)'}\n\n"
             f"Clues:\n{clues}\n\n"
             "Solve it. Use every clue. Before answering, check the answer against each clue and the rules.\n"
+            "Write list items as bare names or IDs (no shared label words such as 'Team' or 'Event'),\n"
+            "unless the rules show the label.\n"
             "First line: ANSWER: <final answer>. At most two short lines of justification after it."
         )
 

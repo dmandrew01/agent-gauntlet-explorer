@@ -73,6 +73,7 @@ def main() -> int:
         plan.append(("text_logic", {"MOCK_SLOW_MODEL": "mock/gemini-3.8-flash", "MOCK_SLOW_S": "45"}, {"_label": "primary model slow"}))
         plan.append(("text_logic", {"MOCK_WRONG_MODEL": "mock/gemini-3.8-flash"}, {"GAUNTLET_CONFIRM_WAIT_S": "5", "_label": "primary wrong, confirm wait on, tie-break"}))
         plan.append(("image_edit", {"MOCK_MAX_IMAGE_CHARS": "200000"}, {"_label": "pro image too large, retry other model"}))
+        plan.append(("image_edit", {"MOCK_IMAGE_FLAKY_MODEL": "mock/painter-pro-image"}, {"_label": "preferred image model returns no image"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()

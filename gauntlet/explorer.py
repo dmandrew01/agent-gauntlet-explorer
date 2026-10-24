@@ -680,7 +680,8 @@ class BlackBox:
             args["agent_id"] = self.agent_id
         parsed = await self._raw_call(name, args, timeout_s)
         err_text = str(parsed.get("exception") or (parsed.get("text") if parsed.get("is_error") else "") or "").lower()
-        if err_text and "agent_id" in err_text:
+        validation = re.search(r"(validation error|unexpected keyword|extra inputs|extra_forbidden|missing \d+ required|field required|additional properties|invalid params)", err_text)
+        if err_text and "agent_id" in err_text and validation:
             self.calls.append(CallRecord(name, _redact(args), False, int(parsed.get("elapsed_ms", 0)),
                                          f"ERROR (retried) {err_text[:280]}"))
             if re.search(r"(unexpected|extra|not permitted|additional)", err_text) and "agent_id" in args:

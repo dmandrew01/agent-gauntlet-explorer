@@ -116,6 +116,8 @@ python tools/package_explorer.py --agent-name "AHGroup" --force
 | `GAUNTLET_HEDGE` | on | Race two models from different families on direct solves; a third breaks ties |
 | `GAUNTLET_CONFIRM_WAIT_S` | 0 | Seconds to wait for the partner after the primary answers (0 = submit at once) |
 | `GAUNTLET_IMAGE_ANALYZE` | off | Describe the input image with image_analyze before editing |
+| `GAUNTLET_IMAGE_HEDGE` | on | Run the top two image models at once |
+| `GAUNTLET_IMAGE_PREFER_WAIT_S` | 15 | How long the first-ranked image model may trail the second |
 | `GAUNTLET_THOUGHTS` | private | `verbose` adds answers, models and tool output to broadcast thoughts (other Practice teams see them) |
 | `GAUNTLET_BLACKBOX_TIME_S` | 300 | Budget when the server has no timer |
 
@@ -129,12 +131,18 @@ poster), image edit not scored (submit failed after the edit). Round 3 fixes:
 no confirmation wait, no pre-submit network calls, explicit no-text and
 preserve-everything image prompts, image submit fallback (REST, then the next
 image model, then the input image).
+Practice round 3 (run on round 2 code; the pull had failed): logic medium
+judged 80 for a "Team " prefix the previous judge accepted; every image run
+lost about 20 s to a silent first-call failure of the preferred image model.
+Round 4 fixes: strip generic label prefixes shared by all list items, bare-name
+prompt hint, run the top two image models in parallel, retry without agent_id
+only on real argument-validation errors.
 
-Verified here: all 11 mock scenarios pass (easy logic, ordering puzzle,
+Verified here: all 12 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image
 generate, slow LLM against a 30 s limit, model without tool calling, slow
 primary model, wrong primary model settled by a tie-breaker, oversized image
-retried with the next model); 21 unit tests; kit tests for model selection and
+retried with the next model, preferred image model returning no image); 21 unit tests; kit tests for model selection and
 packaging; packager `--check` passes; the unpacked tarball runs with a clean
 environment and no `.env`.
 

@@ -551,9 +551,17 @@ def image_submit(edited_image: str, agent_id: str, client_metrics: dict | None =
     return out
 
 
+FLAKY_IMAGE_MODEL = os.getenv("MOCK_IMAGE_FLAKY_MODEL", "")
+
+
 @mcp.tool(name="image_edit", description="Edit an image with an image model. Returns image_uri.")
-def image_edit(image_uri: str, prompt: str, agent_id: str, model: str = "") -> dict:
+async def image_edit(image_uri: str, prompt: str, agent_id: str, model: str = "") -> dict:
     _track(agent_id, "image_edit")
+    if model and model == FLAKY_IMAGE_MODEL:
+        import asyncio
+
+        await asyncio.sleep(3)
+        return {"error": "upstream model returned text without an image", "model": model}
     if model and model not in {"mock/painter-image", "mock/painter-pro-image"}:
         return {"error": f"model {model} is not image-capable"}
     if "orange" not in prompt.lower():

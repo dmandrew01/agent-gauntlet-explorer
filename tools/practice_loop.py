@@ -51,6 +51,7 @@ def main() -> int:
         data = json.loads(record.read_text()) if record.exists() else {}
         if record.exists():
             shutil.copy(record, ROOT / "outputs" / f"{agent_id}-run-{n}.json")
+        (ROOT / "outputs" / f"{agent_id}-run-{n}.log").write_text(proc.stdout + "\n--- stderr ---\n" + proc.stderr)
         challenge = data.get("challenge") or {}
         puzzle = str(challenge.get("puzzle_id") or challenge.get("challenge_type") or "?")[:36]
         result = data.get("result") or {}
