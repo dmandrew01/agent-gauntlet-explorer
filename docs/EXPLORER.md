@@ -117,7 +117,8 @@ python tools/package_explorer.py --agent-name "AHGroup" --force
 | `GAUNTLET_CONFIRM_WAIT_S` | 0 | Seconds to wait for the partner after the primary answers (0 = submit at once) |
 | `GAUNTLET_IMAGE_ANALYZE` | off | Describe the input image with image_analyze before editing |
 | `GAUNTLET_IMAGE_HEDGE` | on | Run the top two image models at once |
-| `GAUNTLET_IMAGE_PREFER_WAIT_S` | 15 | How long the first-ranked image model may trail the second |
+| `GAUNTLET_IMAGE_PREFER_WAIT_S` | 3 | How long the first-ranked image model may trail the second |
+| `GAUNTLET_KEEP_WARM` | on | Keep the REST connection warm until submit, and pre-open the LLM proxy connection |
 | `GAUNTLET_THOUGHTS` | private | `verbose` adds answers, models and tool output to broadcast thoughts (other Practice teams see them) |
 | `GAUNTLET_BLACKBOX_TIME_S` | 300 | Budget when the server has no timer |
 
@@ -137,6 +138,13 @@ lost about 20 s to a silent first-call failure of the preferred image model.
 Round 4 fixes: strip generic label prefixes shared by all list items, bare-name
 prompt hint, run the top two image models in parallel, retry without agent_id
 only on real argument-validation errors.
+Practice round 4: all 5 accepted, average 91.0. Logic medium 98.3, logic easy
+97.55 (submits at 7.2 s), image edit 87.85, image generate 82.1 and 89.15.
+gemini-3.1-flash-lite-image returned in ~7 s every time and judged level with
+pro; pro never finished, and the 15 s preference window wasted ~15 s per image
+run. Round 5: fast image models first (flash-lite, flash, mini, then pro), 3 s
+preference window, warm REST and proxy connections, stronger no-text and
+minimal-edit prompts.
 
 Verified here: all 12 mock scenarios pass (easy logic, ordering puzzle,
 double-encoded clue, hidden vault behind a hex note, image edit, image

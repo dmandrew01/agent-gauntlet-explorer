@@ -111,13 +111,15 @@ class MyStrategy(BaseStrategy):
         text = f"{ctx.rules} {ctx.description}".lower()
         extras = []
         if re.search(r"\bno (visible )?(text|words|letters|typography|lettering)\b|avoid[^.]{0,40}\b(text|logo|watermark)|without (any )?text", text):
-            extras.append("Absolutely no text of any kind anywhere in the image: no letters, words, numbers, "
-                          "signage, captions, labels, logos, brand marks, or watermarks. Surfaces that would carry "
-                          "text (signs, screens, posters) stay blank or abstract.")
+            extras.append("Absolutely no text of any kind anywhere in the image: no title, tagline, letters, "
+                          "words, numbers, signage, captions, labels, logos, brand marks, emblems, or watermarks, "
+                          "including on vehicles, clothing, buildings, and screens. This is textless key art; "
+                          "surfaces that would carry text stay blank or show abstract light only.")
         if ctx.image_url:
-            extras.append("Change only what the instruction asks for. Keep everything else identical to the input "
-                          "image: subject identity, facial features, pose, camera angle, framing, background, "
-                          "lighting, and colors. No style transfer, no added or removed objects.")
+            extras.append("Make the smallest possible edit: change only what the instruction asks for. Every other "
+                          "pixel should match the input: same face and identity, expression, hair, pose, camera angle, "
+                          "framing, crop, resolution, background, lighting, and colors. No style transfer, no "
+                          "retouching, no added or removed objects.")
         if re.search(r"single (coherent )?scene|clean composition", text):
             extras.append("One coherent scene with one clear focal subject and a clean composition.")
         return base + ("\n\n" + "\n".join(extras) if extras else "")

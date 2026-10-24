@@ -189,14 +189,22 @@ def rank_image_models(available: list[str], rows: list[dict[str, Any]] | None = 
     image = [m for m in available if is_image_model(m, rows)]
 
     def key(name: str) -> tuple[int, int]:
+        # Practice (3 runs): flash-lite returned in ~7 s and the judge scored it
+        # 87-88, level with pro's 85; pro's calls took 20+ s or failed. Speed is
+        # 15% of the score, so fast image models go first and pro is the backup.
         low = name.lower()
         pin = next((i for i, frag in enumerate(pinned) if frag.lower() in low), 999)
-        quality = 0
-        if re.search(r"(pro|ultra|gpt-image|imagen-?4|flux.*(pro|max))", low):
-            quality = 2
-        elif re.search(r"(flash|fast|turbo|mini|schnell)", low):
-            quality = 1
-        return (pin, -quality)
+        if re.search(r"flash.?lite|(^|[-_/.])lite\b", low):
+            tier = 0
+        elif re.search(r"(flash|fast|turbo|schnell)", low):
+            tier = 1
+        elif re.search(r"(^|[-_/.])mini\b", low):  # not the "mini" inside "gemini"
+            tier = 2
+        elif re.search(r"(pro|ultra|max)", low):
+            tier = 4
+        else:
+            tier = 3
+        return (pin, tier)
 
     return sorted(image, key=key)
 

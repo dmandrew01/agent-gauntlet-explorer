@@ -98,6 +98,15 @@ class LLM:
             self._scope = scope
             self._client = self._make_client()
 
+    async def warm(self) -> None:
+        """Open the proxy connection before the first real call (best effort)."""
+        try:
+            loop = asyncio.get_running_loop()
+            if hasattr(self._client, "models"):
+                await asyncio.wait_for(loop.run_in_executor(_POOL, lambda: self._client.models.list()), timeout=8)
+        except Exception:
+            pass
+
     @property
     def headers(self) -> dict[str, str]:
         return build_proxy_headers(self.agent_id, self._scope)

@@ -144,6 +144,7 @@ class RunState:
     llm: LLM | None = None
     model_used: str = ""
     best_answer: str = ""
+    fast: Any = None
     record: dict[str, Any] = field(default_factory=dict)
     started_ms: float = field(default_factory=lambda: time.time() * 1000)
 
@@ -191,6 +192,9 @@ async def run(strategy: BaseStrategy) -> int:
             if scope:
                 os.environ["ARENA_USAGE_SCOPE"] = scope
             state.llm = LLM(proxy_host, api_key, agent_id, scope)
+            state.fast = FastSubmit(api_base, api_key)
+            asyncio.create_task(state.llm.warm())
+            state.fast.start()
             client.sampling_responder = _sampling_responder(state)
             client.elicitation_values = {"agent_id": agent_id, "name": agent_name, "_default": agent_id}
 
@@ -863,8 +867,67 @@ async def _draft(state: RunState, answer: str, why: str) -> None:
         pass
 
 
+class FastSubmit:
+    """Keeps one TLS connection to the REST API warm until the submit.
+
+    Practice: the server stamped submissions ~1.8 s after the agent started the
+    POST; a fresh connection (DNS + TLS) per request is most of that. One
+    requests.Session pinged every 2.5 s stays inside typical keep-alive windows.
+    """
+
+    def __init__(self, api_base: str, api_key: str) -> None:
+        import requests
+
+        self.base = api_base.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json", "X-Arena-API-Key": api_key})
+        self._task: asyncio.Task[Any] | None = None
+
+    def start(self) -> None:
+        if os.getenv("GAUNTLET_KEEP_WARM", "1").lower() in {"0", "false", "no"}:
+            return
+        self._task = asyncio.create_task(self._loop())
+
+    async def _loop(self) -> None:
+        for _ in range(240):
+            try:
+                await asyncio.to_thread(self.session.get, f"{self.base}/api/health", timeout=3)
+            except Exception:
+                pass
+            await asyncio.sleep(2.5)
+
+    def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+
+    def submit(self, agent_id: str, answer: str, metrics: dict[str, Any]) -> dict[str, Any]:
+        resp = self.session.post(f"{self.base}/api/submit", json={"agent_id": agent_id, "answer": answer, "client_metrics": metrics}, timeout=60)
+        if resp.status_code >= 400:
+            raise ArenaAPIError(resp.status_code, resp.text)
+        return resp.json()
+
+
 async def _submit_text(state: RunState, answer: str, total_ms: int) -> str:
     metrics = _metrics(state, total_ms)
+    if state.fast is not None:
+        state.fast.stop()
+        try:
+            data = await asyncio.to_thread(state.fast.submit, state.agent_id, answer, metrics)
+            for line in submission_summary_lines(data):
+                log(line)
+            note = missing_tools_note(data)
+            if note:
+                log(note)
+            state.record["result"] = {"accepted": data.get("accepted"), "status": data.get("status"), "score": data.get("score")}
+            return "submitted"
+        except ArenaAPIError as exc:
+            log(f"submit API error {exc.status_code}: {exc.message[:200]}")
+            if exc.status_code == 409:
+                return "already-submitted"
+            if exc.status_code < 500:
+                return f"submit-error-{exc.status_code}"
+        except Exception as exc:
+            log(f"fast submit failed ({type(exc).__name__}); retrying through the kit client")
     for attempt in range(3):
         try:
             result = await asyncio.to_thread(state.http.submit, state.agent_id, answer, metrics)
@@ -988,7 +1051,7 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             # Practice: the preferred image model often failed its first call after
             # ~20 s. Run two models at once; prefer the first-ranked one when it
             # lands within a short window after the other.
-            prefer_wait = float(os.getenv("GAUNTLET_IMAGE_PREFER_WAIT_S", "15"))
+            prefer_wait = float(os.getenv("GAUNTLET_IMAGE_PREFER_WAIT_S", "3"))
             first, second = models[0], models[1]
             tasks = {asyncio.create_task(attempt(m)): m for m in (first, second)}
             got: dict[str, str] = {}
