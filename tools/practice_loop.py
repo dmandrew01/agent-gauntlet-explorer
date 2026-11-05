@@ -45,6 +45,7 @@ def main() -> int:
     totals = []
     for n in range(1, args.runs + 1):
         started = time.monotonic()
+        record.unlink(missing_ok=True)  # never report a previous run's score
         proc = subprocess.run([sys.executable, str(ROOT / "examples" / "explorer" / "agent.py")], env=env,
                               capture_output=True, text=True, timeout=600)
         secs = time.monotonic() - started
@@ -71,8 +72,9 @@ def main() -> int:
         print(f"{n:>2}  {puzzle:36s} {str(result.get('accepted')):5s} {final if final is not None else '-':>6} "
               f"{score.get('quality_score', '-'):>5} {score.get('speed_score', '-'):>5} {score.get('tools_score', '-'):>5} "
               f"{score.get('tokens_score', '-'):>5} {secs:5.0f}  {'; '.join(notes)}")
-        if proc.returncode and not data:
-            print(proc.stdout[-1500:], proc.stderr[-1500:])
+        if proc.returncode and not data.get("result"):
+            lines = [l for l in (proc.stdout + proc.stderr).splitlines() if l.strip()]
+            print("    run failed: " + (lines[-1][:300] if lines else "no output"))
         time.sleep(args.pause)
     if totals:
         print(f"\naverage final score over {len(totals)} scored runs: {sum(totals) / len(totals):.1f}")
