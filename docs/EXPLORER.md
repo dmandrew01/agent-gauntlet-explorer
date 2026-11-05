@@ -114,8 +114,9 @@ python tools/package_explorer.py --agent-name "AHGroup" --force
 | `GAUNTLET_TOOL_RESULT_CHARS` | 2500 | Tool output size fed back to the LLM |
 | `GAUNTLET_LOBBY_WAIT_S` | 3600 | Max lobby wait |
 | `GAUNTLET_HEDGE` | on | Race two models from different families on direct solves; a third breaks ties |
-| `GAUNTLET_CONFIRM_WAIT_S` | 0 | Seconds to wait for the partner after the primary answers (0 = submit at once) |
-| `GAUNTLET_IMAGE_ANALYZE` | off | Describe the input image with image_analyze before editing |
+| `GAUNTLET_CONFIRM_WAIT_S` | 0 easy, 6 medium/hard | Seconds to wait for the partner after the primary answers |
+| `GAUNTLET_IMAGE_REASONING` | on | Analyze, search and decide facts before editing when an image task asks to identify, detect, inspect, report, label, or keep words |
+| `GAUNTLET_TOOL_PLAN` | on | Plan focused calls to tools a text challenge names (such as firecrawl_search) |
 | `GAUNTLET_IMAGE_HEDGE` | on | Run the top two image models at once |
 | `GAUNTLET_IMAGE_PREFER_WAIT_S` | 3 | How long the first-ranked image model may trail the second |
 | `GAUNTLET_KEEP_WARM` | on | Keep the REST connection warm until submit, and pre-open the LLM proxy connection |
@@ -195,3 +196,38 @@ docs/EXPLORER.md
 
 If the organizers ship a newer kit, copy these paths onto it, rerun the
 mock suite and the unit tests, then one Practice run.
+
+
+## Event results and the changes they drove (Nov 5, 2026)
+
+Round 1 (text, breakfast_logic_001): 99.35, first in group, answer in 4.0 s.
+Round 2 (image, image_identify_person_location_001): 63.80, third, 0.65 behind
+the second qualifier. The task asked for image_analyze, then firecrawl_search,
+then an answer-sheet overlay. The agent treated it as a plain edit, skipped
+both tools, and the fast image model invented "Comdex" as the location. The
+winner (Proofable) used gemini-3-pro-image and wrote "Stanford University".
+
+Changes:
+
+- Image reasoning stage: tasks that ask to identify, infer, detect, inspect,
+  report, label, or keep original words now run image_analyze (strongest image
+  model plus one more, in parallel), web search for real-world facts, and a
+  text model that settles the facts and writes the exact edit with verbatim
+  text lines. The image model only renders.
+- Overlay verification: the produced image is read back with image_analyze;
+  missing or misspelled lines trigger one redraw with a stronger model.
+- Submit rationale now carries the findings (facts, detections, changes)
+  instead of a fixed string.
+- Text tool plans: challenges naming a tool (firecrawl_search in 4 of the 5
+  round 1 text puzzles) get one planned, focused call per fact, in parallel,
+  before solving. Previously the tool got one blind call with the whole
+  description as the query.
+- Case rules: "Use uppercase for ARCH_FAMILY" no longer uppercases the whole
+  answer.
+- "No text" image rule stays off when the task needs text (overlays, posters
+  that keep their words).
+- Medium and hard text puzzles wait up to 6 s for a second model to agree.
+
+Mock suite: 18 scenarios, including copies of web_search_001 and the round 2
+image task (location only discoverable by search) and a misspelled overlay
+that must be caught and redrawn.

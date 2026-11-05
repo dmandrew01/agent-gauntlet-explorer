@@ -23,7 +23,7 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parent.parent
 # Practice rotation shape: logic easy/medium/hard, image edit, image generate,
 # plus black-box cases the live event may add.
-SCENARIOS = ["text_logic", "text_order", "text_encoded", "blackbox", "image_edit", "image_generate"]
+SCENARIOS = ["text_logic", "text_order", "text_encoded", "blackbox", "image_edit", "image_generate", "text_web", "image_identify"]
 
 
 def free_port() -> int:
@@ -77,6 +77,7 @@ def main() -> int:
         plan.append(("text_logic", {"MOCK_LOBBY_S": "3"}, {"_label": "lobby, then GO"}))
         plan.append(("blackbox", {"MOCK_NO_NOTE": "1"}, {"GAUNTLET_PROBE": "0", "_label": "hidden tool only in arena.tools.list"}))
         plan.append(("blackbox", {"MOCK_NOTE_KEY_ONLY": "1", "MOCK_CATALOG_NAMES_ONLY": "1"}, {"GAUNTLET_PROBE": "0", "_label": "catalog gives names only (Practice format)"}))
+        plan.append(("image_identify", {"MOCK_GARBLE_TEXT": "1"}, {"_label": "fast model misspells overlay, verify and redraw"}))
     failures = 0
     for i, (scenario, mock_env, agent_env) in enumerate(plan):
         port = free_port()

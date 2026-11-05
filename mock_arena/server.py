@@ -72,6 +72,30 @@ def _uri(png: bytes) -> str:
 
 
 INPUT_IMAGE = _uri(_png(32, 24, lambda x, y: (70, 130, 220) if y < 12 else (40, 160, 60)))
+SPEAKER_IMAGE = _uri(_png(40, 24, lambda x, y: (150, 20, 30) if x < 12 or x > 28 else (40, 60, 160)))
+
+
+def _with_text(uri: str, key: str, text: str) -> str:
+    """Return the PNG with a tEXt chunk (stands in for text drawn onto the image)."""
+    png = base64.b64decode(uri.split(",", 1)[1])
+    body = key.encode("latin-1") + b"\x00" + text.encode("latin-1", "replace")
+    chunk = struct.pack(">I", len(body)) + b"tEXt" + body + struct.pack(">I", zlib.crc32(b"tEXt" + body) & 0xFFFFFFFF)
+    return _uri(png[:-12] + chunk + png[-12:])
+
+
+def _read_text(uri: str, key: str = "Overlay") -> str:
+    try:
+        png = base64.b64decode(uri.split(",", 1)[1])
+    except Exception:
+        return ""
+    i = 8
+    while i + 8 <= len(png):
+        length = struct.unpack(">I", png[i:i + 4])[0]
+        ctype, body = png[i + 4:i + 8], png[i + 8:i + 8 + length]
+        if ctype == b"tEXt" and body.startswith(key.encode() + b"\x00"):
+            return body.split(b"\x00", 1)[1].decode("latin-1")
+        i += 12 + length
+    return ""
 BIG_EDITED_IMAGE = ""  # set after EDITED_IMAGE below
 GENERATED_IMAGE = _uri(_png(24, 24, lambda x, y: (20, 30, 80) if y < 14 else (30, 90, 140)))
 # A bigger edit, like a high-resolution "pro" model returns: same picture plus
@@ -130,6 +154,30 @@ def scenario_payload(name: str) -> dict[str, Any]:
             "rules": "Answer with the five letters, comma-separated, first to last.",
             "clue_texts": ["E beat everyone.", "A finished right after E.", "D finished last.", "B beat C."],
             "required_tools": ["arena.clues.get"], "expected": "E, A, B, C, D",
+        }
+    if name == "text_web":
+        return {
+            "challenge_type": "web-search", "difficulty": "easy", "max_time_s": 120,
+            "description": "Create exactly one NV-CODE line using one web lookup and two simple calculations.",
+            "rules": ("Follow these exact steps: (1) Use firecrawl_search to find the NVIDIA H100 architecture family name. "
+                      "(2) Set NVIDIA_YEAR = 1993 (provided in clues). (3) Compute NVIDIA_AGE = 2026 - NVIDIA_YEAR. "
+                      "(4) Compute PARITY from NVIDIA_AGE: EVEN if divisible by 2, otherwise ODD. (5) Return exactly one line "
+                      "in this exact format: NV-CODE: NVIDIA_YEAR|NVIDIA_AGE|ARCH_FAMILY|PARITY. Use uppercase for ARCH_FAMILY and PARITY."),
+            "clue_texts": ["NVIDIA_YEAR is fixed for this puzzle: 1993.", "Use CURRENT_YEAR = 2026.",
+                           "Find H100 architecture family via web search and write it in uppercase.",
+                           "PARITY rule: EVEN if NVIDIA_AGE % 2 == 0, else ODD."],
+            "required_tools": ["firecrawl_search"], "expected": "NV-CODE: 1993|33|HOPPER|ODD",
+        }
+    if name == "image_identify":
+        return {
+            "challenge_type": "image", "difficulty": "medium", "max_time_s": 280,
+            "description": "Use visual reasoning to identify the person shown, then infer the specific event location from that identity and context clues.",
+            "prompt": ("Workflow requirement: (1) inspect the image with image_analyze to extract identity and context clues, "
+                       "(2) use firecrawl_search to verify who the speaker is and what event/location the image corresponds to, "
+                       "and (3) create an answer-sheet overlay on the image with exactly these lines: 'Person: <name>' and "
+                       "'Event location: <location>'. Do not include extra text. Preserve the original scene and keep text clearly readable."),
+            "reference_notes": "", "input_image_uri": SPEAKER_IMAGE, "expected": "Person: Jensen Huang\nEvent location: Stanford University",
+            "required_tools": ["image_analyze", "firecrawl_search"],
         }
     if name == "image_generate":
         return {
@@ -256,7 +304,11 @@ async def draft(request: Request) -> JSONResponse:
 def score(sess: Session, answer: str) -> dict[str, Any]:
     expected = sess.payload["expected"]
     if sess.modality == "image":
-        correct = answer in ((GENERATED_IMAGE,) if sess.scenario == "image_generate" else (EDITED_IMAGE, BIG_EDITED_IMAGE))
+        if sess.scenario == "image_identify":
+            drawn = _read_text(answer)
+            correct = all(line in drawn for line in expected.split("\n"))
+        else:
+            correct = answer in ((GENERATED_IMAGE,) if sess.scenario == "image_generate" else (EDITED_IMAGE, BIG_EDITED_IMAGE))
     else:
         correct = answer.strip() == expected
     missing = [t for t in sess.payload.get("required_tools", []) if t not in sess.tools_used]
@@ -353,6 +405,24 @@ def mock_brain(req: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None, 
     tools = req.get("tools") or []
     fn_names = {t["function"]["name"] for t in tools if isinstance(t, dict) and "function" in t}
     flag = re.search(r"FLAG\{[a-z_]+\}", text)
+    if "TOOL PLAN." in text:
+        calls = [{"tool": "firecrawl_search", "args": {"query": "NVIDIA H100 architecture family"}}] if "NV-CODE" in text else []
+        return None, json.dumps({"calls": calls}), []
+    if "IMAGE SEARCH QUERIES." in text:
+        q = "Jensen Huang talk red curtain blue NVIDIA shirt event" if "Jensen" in text else "speaker on stage"
+        return None, json.dumps({"queries": [q]}), []
+    if "IMAGE PLAN." in text:
+        person = "Jensen Huang" if "Jensen" in text else "Unknown speaker"
+        loc = "Stanford University" if "Stanford" in text else "Comdex"
+        return None, json.dumps({
+            "facts": {"person": person, "event_location": loc},
+            "overlay_lines": [f"Person: {person}", f"Event location: {loc}"],
+            "edit_instruction": (f"Add a clean answer-sheet panel in the lower left with exactly these lines: 'Person: {person}' "
+                                 f"and 'Event location: {loc}'. Keep the rest of the scene unchanged."),
+            "report": f"Identified {person}; search places the talk at {loc}.",
+        }), []
+    if "NV-CODE" in text:
+        return {"answer": "NV-CODE: 1993|33|HOPPER|ODD" if "Hopper" in text else "NV-CODE: 1993|33|AMPERE|ODD"}, None, []
     if "Five runners finished" in text:
         ok = all(c in text for c in ("E beat everyone", "D finished last", "B beat C"))
         return {"answer": "E, A, B, C, D" if ok else "E, A, C, B, D"}, None, []
@@ -578,6 +648,18 @@ async def image_edit(image_uri: str, prompt: str, agent_id: str, model: str = ""
         return {"error": "upstream model returned text without an image", "model": model}
     if model and model not in {"mock/painter-image", "mock/painter-pro-image"}:
         return {"error": f"model {model} is not image-capable"}
+    sess = _session(agent_id)
+    if sess and sess.scenario == "image_identify":
+        lines = re.findall(r"(?:Person|Event location): [^'\"\n]+", prompt)
+        seen: list[str] = []
+        for line in lines:
+            line = line.strip().rstrip(".")
+            if line not in seen:
+                seen.append(line)
+        drawn = "\n".join(seen[:2])
+        if os.getenv("MOCK_GARBLE_TEXT") and model != "mock/painter-pro-image":
+            drawn = drawn.replace("Stanford", "Stamford").replace("Huang", "Haung")
+        return {"image_uri": _with_text(SPEAKER_IMAGE, "Overlay", drawn), "model": model or "mock/painter-image"}
     if "orange" not in prompt.lower():
         return {"image_uri": INPUT_IMAGE, "model": model}
     if model == "mock/painter-pro-image":
@@ -596,7 +678,31 @@ def image_generate(prompt: str, agent_id: str, model: str = "") -> dict:
 @mcp.tool(name="image_analyze", description="Describe an image or answer a question about it.")
 def image_analyze(image_uri: str, question: str, agent_id: str, model: str = "") -> dict:
     _track(agent_id, "image_analyze")
+    drawn = _read_text(image_uri)
+    if drawn:
+        return {"text": drawn}
+    if image_uri == SPEAKER_IMAGE:
+        return {"text": ("A man with glasses in a blue NVIDIA-logo shirt speaks on a stage in front of a red curtain. "
+                         "He resembles NVIDIA co-founder Jensen Huang (medium confidence). The venue is unclear; "
+                         "possibly an early tech conference such as Comdex.")}
     return {"text": "A flat landscape: blue sky on the top half, green grass on the bottom half, no text."}
+
+
+@mcp.tool(name="firecrawl_search", description="Search the web. Returns titles, URLs and snippets.")
+def firecrawl_search(query: str, limit: int = 5) -> dict:
+    low = query.lower()
+    corpus = [
+        (("h100",), "NVIDIA H100 Tensor Core GPU", "The H100 is built on the NVIDIA Hopper architecture."),
+        (("a100",), "NVIDIA A100", "The A100 GPU is based on the NVIDIA Ampere architecture."),
+        (("cuda",), "CUDA Zone", "CUDA is a parallel computing platform developed by NVIDIA."),
+        (("jensen",), "Jensen Huang at Stanford eCorner",
+         "Video: NVIDIA's Jensen Huang speaks at Stanford University, red curtain stage, blue NVIDIA shirt."),
+    ]
+    hits = [{"title": t, "url": f"https://example.org/{i}", "snippet": snip}
+            for i, (keys, t, snip) in enumerate(corpus) if any(k in low for k in keys)]
+    for sess in SESSIONS.values():  # the mock tool has no agent_id: credit every live session
+        sess.tools_used.add("firecrawl_search")
+    return {"query": query, "results": hits[: max(1, int(limit or 5))] or [{"title": "No results", "snippet": ""}]}
 
 
 # Black-box extras (listed)

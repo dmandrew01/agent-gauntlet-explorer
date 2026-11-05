@@ -110,7 +110,9 @@ class MyStrategy(BaseStrategy):
         base = super().build_image_prompt(ctx)
         text = f"{ctx.rules} {ctx.description}".lower()
         extras = []
-        if re.search(r"\bno (visible )?(text|words|letters|typography|lettering)\b|avoid[^.]{0,40}\b(text|logo|watermark)|without (any )?text", text):
+        wants_text = re.search(r"(overlay|answer[- ]sheet|caption|label|legible|readable|typography|same words|original words|"
+                               r"text lines?|exactly these lines|lines verbatim)", text)
+        if not wants_text and re.search(r"\bno (visible )?(text|words|letters|typography|lettering)\b|avoid[^.]{0,40}\b(text|logo|watermark)|without (any )?text", text):
             extras.append("Absolutely no text of any kind anywhere in the image: no title, tagline, letters, "
                           "words, numbers, signage, captions, labels, logos, brand marks, emblems, or watermarks, "
                           "including on vehicles, clothing, buildings, and screens. This is textless key art; "

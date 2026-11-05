@@ -49,8 +49,8 @@ from model_selector import fetch_available_model_rows
 from . import compat, decoders, pngtools
 from .answer import enforce, extract_answer, infer_format, is_invalid
 from .clock import Clock
-from .explorer import NEVER_AUTO_CALL, BlackBox, ExplorerArenaClient, synthesize_args
-from .llm import LLM
+from .explorer import NEVER_AUTO_CALL, BlackBox, ExplorerArenaClient, ToolInfo, synthesize_args
+from .llm import LLM, parse_json_loose
 from .models import rank_image_models, rank_text_models
 from .react import ReactAgent
 
@@ -145,6 +145,7 @@ class RunState:
     llm: LLM | None = None
     model_used: str = ""
     best_answer: str = ""
+    image_rationale: str = ""
     fast: Any = None
     record: dict[str, Any] = field(default_factory=dict)
     started_ms: float = field(default_factory=lambda: time.time() * 1000)
@@ -515,7 +516,16 @@ async def _solve_text_body(state: RunState, box: BlackBox, challenge: dict[str, 
     clues = fetched or work["clues"]
     work["clues"] = clues
     box.ctx.challenge_text = description or (clues[0] if clues else "")
-    evidence = await _call_required(box, required, description, clues)
+    # Tools the challenge names (event: "Use firecrawl_search to ...") get planned,
+    # focused calls instead of one blind call with the whole description as query.
+    full_text = " ".join([blob, *clues])
+    named = [box.tools[n] for n in required if n in box.tools and not n.startswith("arena.")
+             and box.tools[n].kind not in NEVER_AUTO_CALL | {"broadcast", "timer", "challenge"}]
+    named += [t for t in _mentioned_tools(box, full_text) if not t.name.startswith("arena.") and t not in named]
+    black_box = bool(re.search(r"\b(hidden|unlisted|not all are listed|unlock|vault|explore the tools|decrypt|secret)\b", full_text, re.I))
+    plan_mode = bool(named) and not black_box and os.getenv("GAUNTLET_TOOL_PLAN", "1").lower() not in {"0", "false", "no"}
+    planned = {t.name for t in named} if plan_mode else set()
+    evidence = await _call_required(box, [r for r in required if r not in planned], description, clues)
     state.record.setdefault("timeline", {})["clues_and_required"] = round(clock.elapsed(), 1)
 
     spec = infer_format(rules, description)
@@ -525,7 +535,13 @@ async def _solve_text_body(state: RunState, box: BlackBox, challenge: dict[str, 
     state.model_used = model
     log(f"model={model} ranked={ranked[:5]} format={spec.describe()} time_left={clock.left():.1f}s")
 
-    agentic, why = _needs_agentic(box, challenge, clues, required)
+    if plan_mode:
+        work["mode"] = "tool-plan"
+        await state.thoughts.say(f"{len(clues)} clues read. Gathering facts with the named tools.")
+        evidence = evidence + await _run_tool_plan(state, box, ctx, model, clock, named)
+        state.record["timeline"]["tool_plan_done"] = round(clock.elapsed(), 1)
+
+    agentic, why = (False, "tool plan") if plan_mode else _needs_agentic(box, challenge, clues, required)
     answer, confidence = "", 0.0
     if not agentic:
         await state.thoughts.say(f"{len(clues)} clues read. Solving.")
@@ -556,6 +572,60 @@ async def _solve_text_body(state: RunState, box: BlackBox, challenge: dict[str, 
     answer = await _finalize_format(state, model, ranked, clock, spec, ctx, answer)
     if answer and not is_invalid(answer):
         work["answer"] = answer
+
+
+async def _run_tool_plan(state: RunState, box: BlackBox, ctx: ChallengeContext, model: str, clock: Clock,
+                         tools: list[ToolInfo]) -> list[str]:
+    """One LLM call plans focused calls to the named tools; they run in parallel."""
+    assert state.llm is not None
+    listing = []
+    for t in tools:
+        props = {k: (v.get("type") if isinstance(v, dict) else "any") for k, v in t.properties.items() if k != "agent_id"}
+        req = [r for r in t.required if r != "agent_id"]
+        listing.append(f"- {t.name}: {t.description[:400]} | args {json.dumps(props)} | required {req}")
+    system = (
+        "TOOL PLAN. You plan tool calls for a timed challenge. Reply with one JSON object only: "
+        '{"calls": [{"tool": "<name>", "args": {...}}]}. Use only the listed tools. Write one focused query per fact '
+        "the task needs (short, specific, no instructions inside the query). Respect any count the rules give "
+        "(at least once, one per claim, multiple distinct sources). At most 4 calls. Never call a submit tool."
+    )
+    user = (f"CHALLENGE: {ctx.description}\nRULES: {ctx.rules}\nCLUES:\n" + "\n".join(f"- {c}" for c in ctx.clues)
+            + "\n\nTOOLS:\n" + "\n".join(listing))
+    reply = await state.llm.chat(model, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                                 max_tokens=600, temperature=0.0, timeout_s=min(20.0, max(6.0, clock.left() * 0.2)))
+    plan = parse_json_loose(reply.content)
+    raw_calls = plan.get("calls") if isinstance(plan, dict) else plan if isinstance(plan, list) else []
+    by_name = {t.name: t for t in tools}
+    calls: list[tuple[ToolInfo, dict[str, Any]]] = []
+    for item in raw_calls or []:
+        if not isinstance(item, dict):
+            continue
+        tool = by_name.get(str(item.get("tool") or item.get("name") or ""))
+        args = item.get("args") if isinstance(item.get("args"), dict) else item.get("arguments")
+        if tool and isinstance(args, dict):
+            calls.append((tool, dict(args)))
+    for tool in tools:  # every named tool runs at least once
+        if not any(c[0] is tool for c in calls):
+            q_param = _param(tool, r"query|^q$|search|term|keyword|text|prompt")
+            values = {q_param: re.sub(r"\s+", " ", ctx.description)[:200]} if q_param else {}
+            box.ctx.overrides = values
+            args = synthesize_args(tool, box.ctx) or values
+            box.ctx.overrides = {}
+            calls.append((tool, args))
+    calls = calls[:5]
+    for tool, args in calls:
+        if tool.kind == "search":
+            for k, v in _search_limits(tool).items():
+                args.setdefault(k, v)
+    log(f"tool plan: {[(t.name, compat.short(a, 120)) for t, a in calls]}")
+    state.record["tool_plan"] = [{"tool": t.name, "args": compat.short(a, 300)} for t, a in calls]
+    timeout = max(5.0, min(30.0, clock.left() * 0.35))
+    results = await asyncio.gather(*[box.call(t.name, a, source="tool-plan", timeout_s=timeout) for t, a in calls])
+    evidence = []
+    for (tool, args), res in zip(calls, results):
+        body = res.get("error") and f"error {res['error']}" or compat.short(res.get("dict") or res.get("text"), 2500)
+        evidence.append(f"{tool.name}({compat.short({k: v for k, v in args.items() if k != 'agent_id'}, 200)}): {body}")
+    return evidence
 
 
 async def _fetch_clues(box: BlackBox, agent_id: str) -> list[str]:
@@ -712,6 +782,14 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
 
     hedge = os.getenv("GAUNTLET_HEDGE", "1").lower() not in {"0", "false", "no"}
     tight = 0 < float(ctx.max_time_s or 0) <= 60
+    if os.getenv("GAUNTLET_CONFIRM_WAIT_S"):
+        confirm_wait = CONFIRM_WAIT_S
+    elif tight or "easy" in (ctx.difficulty or "").lower():
+        confirm_wait = 0.0
+    else:
+        # Medium and hard puzzles: a second model gets up to 6 s to agree (about
+        # 0.75 final points of speed on a 120 s puzzle, against 35+ for a wrong answer).
+        confirm_wait = 6.0
     lineup = _direct_lineup(model, ranked, tight=tight) if hedge else [model]
     log(f"direct lineup: {lineup}")
     tried: set[str] = set()
@@ -752,7 +830,7 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
                         got[tasks[task]] = late
             if primary in got and partner in got:
                 break
-            if primary in got and CONFIRM_WAIT_S <= 0:
+            if primary in got and confirm_wait <= 0:
                 break  # calibrated primary answered: submit now (speed is 15% of score)
             if got and soft_deadline is None:
                 # One answer is in. Give the other a bounded window: longer when the
@@ -760,7 +838,7 @@ async def _solve_direct(state: RunState, box: BlackBox, ctx: ChallengeContext, m
                 if primary not in got:
                     window = min(clock.left() * 0.3, 15.0) if tight else min(clock.left() * 0.45, 30.0)
                 else:
-                    window = min(clock.left() * 0.25, CONFIRM_WAIT_S)
+                    window = min(clock.left() * 0.25, confirm_wait)
                 soft_deadline = time.monotonic() + max(4.0, window)
         for task in pending:
             task.cancel()
@@ -1011,6 +1089,241 @@ async def _submit_text(state: RunState, answer: str, total_ms: int) -> str:
 # Image
 
 
+
+# ---------------------------------------------------------------------------
+# Image reasoning (event round 2 lesson)
+#
+# image_identify_person_location_001 asked for: image_analyze -> firecrawl_search
+# -> an answer-sheet overlay "Person: <name>" / "Event location: <location>".
+# Handing that whole task to a fast image model produced a made-up location.
+# Facts now come first (vision analysis, search, a text model decides), and the
+# image model only renders exact text and the requested change.
+
+REASONING_RE = re.compile(
+    r"\b(identif\w*|infer\w*|recogni[sz]\w*|verify|detect\w*|inspect\w*|analy[sz]\w*|inconsisten\w*|anomal\w*|"
+    r"implausible|report\w*|count|how many|transcrib\w*|answer[- ]sheet|overlay|caption\w*|label\w*|"
+    r"same words|original words|original text|same wording|keep the (?:original )?(?:text|words))\b", re.I)
+FACTS_RE = re.compile(
+    r"\b(identif\w*|infer\w*|recogni[sz]\w*|determine|name)\W+(?:\w+\W+){0,3}?(person|people|speaker|subject|location|"
+    r"place|event|landmark|venue|city|country|year|brand|company|who|where)\b", re.I)
+TEXT_OUT_RE = re.compile(
+    r"(overlay|answer[- ]sheet|caption|label|legible|readable|typography|same words|original words|exact(?:ly)? (?:these )?lines|"
+    r"'[^'\n]{1,40}:\s*<[^>]{1,40}>')", re.I)
+
+
+def _norm_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+
+
+def _image_task_text(ch: dict[str, Any]) -> str:
+    """Every instruction-like string field of an image challenge."""
+    skip = {"input_image_uri", "image_uri", "challenge_id", "puzzle_id", "agent_id", "challenge_type", "difficulty"}
+    parts = []
+    for key, value in ch.items():
+        if key in skip or not isinstance(value, str) or not value.strip() or value.startswith("data:"):
+            continue
+        parts.append(f"{key}: {value.strip()}")
+    return "\n".join(parts)
+
+
+def _mentioned_tools(box: BlackBox, text: str) -> list[ToolInfo]:
+    low = text.lower()
+    return [t for t in box.tools.values()
+            if t.name.lower() in low and t.kind not in NEVER_AUTO_CALL and t.kind not in {"broadcast", "challenge", "submit"}]
+
+
+def _param(tool: ToolInfo, pattern: str) -> str:
+    for name in tool.properties:
+        if name != "agent_id" and re.search(pattern, name, re.I):
+            return name
+    return ""
+
+
+async def _call_with(box: BlackBox, state: RunState, tool: ToolInfo, values: dict[str, Any], *, model: str = "",
+                     timeout_s: float = 30.0, source: str = "image") -> dict[str, Any]:
+    """Call ``tool`` with values mapped onto whatever its schema names them."""
+    box.ctx.overrides = dict(values)
+    args = synthesize_args(tool, box.ctx) or {}
+    box.ctx.overrides = {}
+    args.update({k: v for k, v in values.items() if k in tool.properties or not tool.properties})
+    extra = build_image_tool_arguments(list(_raw_defs(box)), tool.name, selected_model=model,
+                                       llm_api_key=state.api_key, arena_api_key=state.api_key)
+    args.update(extra)
+    return await box.call(tool.name, args, source=source, timeout_s=timeout_s)
+
+
+def _analysis_text(res: dict[str, Any]) -> str:
+    d = res.get("dict") or {}
+    for key in ("text", "analysis", "answer", "description", "content", "result", "raw"):
+        if isinstance(d.get(key), str) and d[key].strip():
+            return d[key].strip()
+    return str(res.get("text") or "").strip()
+
+
+async def _analyze(box: BlackBox, state: RunState, analyzer: ToolInfo, uri: str, question: str, models: list[str],
+                   clock: Clock, *, budget_s: float, label: str, grace_s: float | None = None) -> list[tuple[str, str]]:
+    """Ask up to two image models about ``uri`` in parallel. Returns [(model, text)]."""
+    img_param = _param(analyzer, r"image|uri|url|src") or "image_uri"
+    q_param = _param(analyzer, r"question|prompt|query|instruction|text") or "question"
+    lineup = models[:2] if "model" in analyzer.properties else [""]
+    errors: list[str] = state.record.setdefault("image_errors", [])
+
+    async def one(model: str) -> tuple[str, str]:
+        res = await _call_with(box, state, analyzer, {img_param: uri, q_param: question}, model=model,
+                               timeout_s=max(5.0, min(budget_s, clock.left() - 10)))
+        text = _analysis_text(res)
+        if res.get("error") or not text:
+            errors.append(f"{label} {model or 'default'}: {str(res.get('error') or 'empty analysis')[:300]}")
+            return model, ""
+        return model, text
+
+    state.record.setdefault("timeline", {})[f"{label}_start"] = round(clock.elapsed(), 1)
+    tasks = [asyncio.create_task(one(m)) for m in lineup]
+    limit = time.monotonic() + max(5.0, min(budget_s, clock.left() - 10))
+    pending = set(tasks)
+    out: list[tuple[str, str]] = []
+    while pending and time.monotonic() < limit:
+        done, pending = await asyncio.wait(pending, timeout=max(0.0, limit - time.monotonic()), return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            if not t.cancelled() and t.exception() is None and t.result()[1]:
+                out.append(t.result())
+        if out and grace_s is not None:
+            # One answer is in; the other model only gets a short grace period.
+            limit = min(limit, time.monotonic() + grace_s)
+    for t in pending:
+        t.cancel()
+    if not out and "model" in analyzer.properties and clock.left() > 30:
+        # Every model choice failed fast: try once with no model at all.
+        model, text = await one("")
+        if text:
+            out = [(model, text)]
+    state.record["timeline"][f"{label}_done"] = round(clock.elapsed(), 1)
+    return out
+
+
+def _analyzer_models(ranked_image: list[str]) -> list[str]:
+    """Knowledge matters for identification, so the strongest image model leads."""
+    strong = [m for m in ranked_image if re.search(r"(pro|ultra|max)\b|-pro-", m.lower())]
+    mid = [m for m in ranked_image if m not in strong and not re.search(r"lite", m.lower())]
+    return strong[:1] + mid[:1] + [m for m in ranked_image if m not in strong[:1] + mid[:1]]
+
+
+async def _image_reasoning(state: RunState, box: BlackBox, ch: dict[str, Any], clock: Clock, input_uri: str,
+                           task: str, ranked_image: list[str], clues: list[str]) -> dict[str, Any]:
+    """Analyze, search, decide. Returns {instruction, overlay_lines, report, facts}."""
+    assert state.llm is not None
+    out: dict[str, Any] = {"instruction": "", "overlay_lines": [], "report": "", "facts": {}}
+    mentioned = _mentioned_tools(box, task)
+    analyzer = box.find("image_analyze") or next(iter(box.by_kind("image_analyze")), None)
+    searcher = next((t for t in mentioned if t.kind == "search"), None) or next(iter(box.by_kind("search")), None)
+    wants_facts = bool(FACTS_RE.search(task)) or any(t.kind == "search" for t in mentioned)
+    text_model = (rank_text_models(state.models, rows=state.model_rows) or [None])[0]
+    text_model = text_model.name if text_model else (state.models[0] if state.models else "")
+
+    analyses: list[tuple[str, str]] = []
+    if analyzer and input_uri:
+        await state.thoughts.say("Analyzing the image before editing.")
+        question = (
+            f"TASK: {task[:1200]}\n\n"
+            "Study this image for an editor and a fact-checker. Describe every person (name them if you recognize "
+            "them, with your confidence), clothing, logos, any visible text exactly as written, the setting, and every "
+            "clue about the place, event, or date. Point out anything physically inconsistent or implausible. Then answer "
+            "each question the task asks with your best specific guess and a confidence."
+        )
+        # Facts (who, where) need the stronger model's knowledge, so wait for both.
+        # Visual tasks (blur faces, fix an anomaly) go on 5 s after the first answer.
+        analyses = await _analyze(box, state, analyzer, input_uri, question, _analyzer_models(ranked_image), clock,
+                                  budget_s=min(45.0, clock.left() * 0.3), label="analyze",
+                                  grace_s=None if wants_facts else 5.0)
+        for model, text in analyses:
+            log(f"analysis[{model or 'default'}]: {text[:200]}")
+    analysis_block = "\n\n".join(f"[analysis by {m or 'image model'}]\n{t[:2500]}" for m, t in analyses) or "(no analysis available)"
+
+    search_block = ""
+    if searcher and wants_facts and clock.left() > 40:
+        await state.thoughts.say("Checking the facts with a web search.")
+        qreply = await state.llm.chat(text_model, [
+            {"role": "system", "content": "IMAGE SEARCH QUERIES. Reply with one JSON object only: {\"queries\": [\"...\"]}. "
+                                          "Write 2 or 3 short, specific web queries that would confirm the facts the task asks for "
+                                          "(who, where, which event). Use names and distinctive details from the analysis."},
+            {"role": "user", "content": f"TASK:\n{task[:1500]}\n\nCLUES: {clues}\n\nIMAGE ANALYSIS:\n{analysis_block[:4000]}"},
+        ], max_tokens=300, temperature=0.0, timeout_s=min(20.0, clock.left() * 0.15))
+        plan = parse_json_loose(qreply.content) or {}
+        queries = [str(q).strip() for q in (plan.get("queries") if isinstance(plan, dict) else plan) or [] if str(q).strip()][:3]
+        if not queries:
+            queries = [re.sub(r"\s+", " ", task)[:150]]
+        q_param = _param(searcher, r"query|^q$|search|term|keyword|text|prompt") or "query"
+        results = await asyncio.gather(*[
+            _call_with(box, state, searcher, {q_param: q, **_search_limits(searcher)}, timeout_s=min(25.0, clock.left() * 0.2), source="search")
+            for q in queries])
+        parts = []
+        for q, r in zip(queries, results):
+            if r.get("error"):
+                parts.append(f"[search: {q}] error: {str(r['error'])[:200]}")
+            else:
+                parts.append(f"[search: {q}]\n{compat.short(r.get('dict') or r.get('text'), 2500)}")
+        search_block = "\n\n".join(parts)
+        state.record["image_search"] = [p[:600] for p in parts]
+
+    await state.thoughts.say("Deciding the answer and the exact edit.")
+    compose_system = (
+        "IMAGE PLAN. You plan the single image edit for a judged challenge. First decide every fact the task asks for, "
+        "weighing the image analyses, the search results, the clues, and your own knowledge; prefer specific, verifiable "
+        "answers over vague ones. Then write the instruction for an image model. Reply with one JSON object only:\n"
+        "{\"facts\": {...}, \"overlay_lines\": [\"exact text line\", ...], \"edit_instruction\": \"...\", \"report\": \"...\"}\n"
+        "- overlay_lines: every line of text the output image must show, verbatim and in order, filled in with the facts "
+        "(for example 'Person: Ada Lovelace'). Use [] when the task asks for no new text. When the task says to keep the "
+        "original words, list those words exactly as they appear.\n"
+        "- edit_instruction: complete and self-contained. Say exactly what to change, quote every text line verbatim, give "
+        "placement and legibility (high-contrast panel, large clean font), and list what must stay unchanged.\n"
+        "- report: two or three sentences for the judge: what was found (facts, detections, counts) and what was changed."
+    )
+    compose_user = (f"TASK:\n{task[:2500]}\n\nCLUES: {clues}\n\nIMAGE ANALYSES:\n{analysis_block[:5000]}\n\n"
+                    f"SEARCH RESULTS:\n{search_block[:5000] or '(none)'}")
+    reply = await state.llm.chat(text_model, [{"role": "system", "content": compose_system}, {"role": "user", "content": compose_user}],
+                                 max_tokens=1500, temperature=0.0, timeout_s=min(40.0, max(8.0, clock.left() * 0.25)))
+    plan = parse_json_loose(reply.content)
+    if isinstance(plan, dict):
+        lines = plan.get("overlay_lines")
+        out["overlay_lines"] = [str(x).strip() for x in lines if str(x).strip()] if isinstance(lines, list) else []
+        out["instruction"] = str(plan.get("edit_instruction") or "").strip()
+        out["report"] = str(plan.get("report") or "").strip()
+        out["facts"] = plan.get("facts") if isinstance(plan.get("facts"), dict) else {}
+    else:
+        state.record.setdefault("image_errors", []).append(f"compose: {reply.error or 'no JSON'}: {reply.content[:200]}")
+    state.record["image_plan"] = {k: out[k] for k in ("facts", "overlay_lines", "report")}
+    state.record["image_plan"]["instruction"] = out["instruction"][:800]
+    log(f"image plan: facts={out['facts']} lines={out['overlay_lines']}")
+    return out
+
+
+def _search_limits(tool: ToolInfo) -> dict[str, Any]:
+    """Sensible values for count-like search parameters (never 0)."""
+    vals: dict[str, Any] = {}
+    for name, spec in tool.properties.items():
+        if isinstance(spec, dict) and spec.get("type") in ("integer", "number") and re.search(r"limit|num|count|max|top|^k$|results", name, re.I):
+            hi = spec.get("maximum")
+            vals[name] = int(min(5, hi)) if isinstance(hi, (int, float)) else 5
+    return vals
+
+
+async def _verify_overlay(box: BlackBox, state: RunState, uri: str, lines: list[str], ranked_image: list[str],
+                          clock: Clock) -> tuple[int, str]:
+    """Read the text back from a produced image. Returns (lines matched, transcript)."""
+    analyzer = box.find("image_analyze") or next(iter(box.by_kind("image_analyze")), None)
+    if not analyzer or not lines:
+        return len(lines), ""
+    got = await _analyze(box, state, analyzer, uri,
+                         "Transcribe every piece of text visible in this image exactly as written, one line per text line. "
+                         "Output only the text.", [m for m in ranked_image if "lite" not in m.lower()][:1] or ranked_image[:1],
+                         clock, budget_s=min(25.0, clock.left() * 0.25), label="verify")
+    transcript = " ".join(t for _m, t in got)
+    if not transcript:
+        return len(lines), ""  # cannot read back: do not punish the image
+    norm = _norm_text(transcript)
+    return sum(1 for line in lines if _norm_text(line) and _norm_text(line) in norm), transcript
+
+
 async def solve_image(state: RunState, box: BlackBox) -> str:
     tool = box.find("arena.image.get_challenge")
     assert tool is not None
@@ -1036,7 +1349,15 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
     box.ctx.image_uri = input_uri
     box.ctx.challenge_text = prompt
 
-    rules = "\n".join(p for p in (prompt, notes) if p.strip())
+    task_text = _image_task_text(ch)
+    rules = "\n".join(p for p in (prompt, notes, str(ch.get("rules") or "")) if p.strip())
+    clue_task = asyncio.create_task(_fetch_clues(box, state.agent_id)) if box.find("arena.clues.list") else None
+    mentioned = _mentioned_tools(box, task_text)
+    needs_reasoning = bool(REASONING_RE.search(task_text)) or any(t.kind in {"image_analyze", "search"} for t in mentioned)
+    if os.getenv("GAUNTLET_IMAGE_REASONING", "1").lower() in {"0", "false", "no"}:
+        needs_reasoning = False
+    state.record["image_mode"] = "reasoning" if needs_reasoning else "direct"
+    log(f"image mode={state.record['image_mode']} mentioned={[t.name for t in mentioned]}")
     ctx = _ctx(ch, clues=[], models=state.models, clock=clock, image_url=input_uri or None,
                description=str(ch.get("description") or ""), rules=rules)
     image_models = rank_image_models(state.models, state.model_rows)
@@ -1047,32 +1368,41 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
     state.model_used = ranked[0] if ranked else ""
     image_prompt = state.strategy.build_image_prompt(ctx)
 
-    produced: dict[str, Any] = {"uri": "", "plan": "", "prompt": image_prompt}
+    produced: dict[str, Any] = {"uri": "", "plan": "", "prompt": image_prompt, "reasoning": None}
 
     async def _produce() -> None:
-        nonlocal image_prompt
+        nonlocal image_prompt, ranked
+        if needs_reasoning and produced["reasoning"] is None:
+            clues: list[str] = []
+            if clue_task is not None:
+                try:
+                    clues = await asyncio.wait_for(asyncio.shield(clue_task), timeout=2.0)
+                except Exception:
+                    clues = []
+            try:
+                produced["reasoning"] = await _image_reasoning(state, box, ch, clock, input_uri, task_text, ranked, clues)
+            except Exception as exc:
+                log(f"image reasoning failed ({type(exc).__name__}: {exc}); editing from the task text")
+                produced["reasoning"] = {"instruction": "", "overlay_lines": [], "report": "", "facts": {}}
+            plan_r = produced["reasoning"]
+            if plan_r.get("instruction"):
+                lines = plan_r.get("overlay_lines") or []
+                rules2 = plan_r["instruction"]
+                if lines:
+                    rules2 += "\n\nThe image must show exactly these text lines, verbatim, and no other new text:\n" + "\n".join(lines)
+                ctx2 = _ctx(ch, clues=[], models=state.models, clock=clock, image_url=input_uri or None,
+                            description=str(ch.get("description") or ""), rules=rules2 + "\n\nOriginal task:\n" + rules)
+                image_prompt = state.strategy.build_image_prompt(ctx2)
+            else:
+                # No settled facts: the strongest image model's own knowledge is the best bet.
+                strong = [m for m in ranked if re.search(r"(pro|ultra|max)\b|-pro-", m.lower())]
+                ranked = strong + [m for m in ranked if m not in strong]
         # Pixel-level inspection of the input is free; a vision description costs one tool call.
         if input_uri.startswith("data:"):
             data = compat.decode_b64_loose(input_uri)
             if data:
                 report = pngtools.inspect_image(data)
                 log(f"input image: {report.get('format')} {report.get('width')}x{report.get('height')}")
-        analyzer = box.find("image_analyze") or next(iter(box.by_kind("image_analyze")), None)
-        use_analyze = os.getenv("GAUNTLET_IMAGE_ANALYZE", "0").lower() in {"1", "true", "yes"}
-        if use_analyze and input_uri and analyzer and clock.left() > 0.55 * clock.max_time_s:
-            extra = build_image_tool_arguments(list(_raw_defs(box)), analyzer.name, selected_model=ranked[0] if ranked else "",
-                                               llm_api_key=state.api_key, arena_api_key=state.api_key)
-            state.record.setdefault("timeline", {})["analyze_start"] = round(clock.elapsed(), 1)
-            ares = await box.call(analyzer.name, {"image_uri": input_uri, "question": (
-                "Describe this image precisely: subjects, layout, colors, lighting, style, any text. "
-                f"Then list what must stay unchanged when applying this edit: {prompt}"), "agent_id": state.agent_id, **extra},
-                source="image", timeout_s=min(30, clock.left() * 0.3))
-            analysis = str((ares.get("dict") or {}).get("text") or ares.get("text") or "").strip()
-            if analysis and not ares.get("error"):
-                await state.thoughts.say("Input image analyzed.")
-                await state.thoughts.detail(f"Analysis: {analysis[:140]}")
-                image_prompt += f"\n\nPreserve everything not named in the edit. Source image details: {analysis[:900]}"
-
         plan = state.strategy.plan_image_tool(ctx, [n for n in box.tools if box.tools[n].kind.startswith("image_")])
         if plan == "image_analyze" or plan not in box.tools:
             plan = "image_edit" if input_uri and "image_edit" in box.tools else "image_generate"
@@ -1147,6 +1477,26 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
             if uri:
                 output_uri = uri
                 state.model_used = model or state.model_used
+        lines = (produced.get("reasoning") or {}).get("overlay_lines") or []
+        if output_uri and lines and clock.left() > 45 and not produced.get("verified"):
+            produced["verified"] = True
+            matched, transcript = await _verify_overlay(box, state, output_uri, lines, ranked, clock)
+            state.record["overlay_check"] = {"matched": matched, "of": len(lines), "transcript": transcript[:400]}
+            log(f"overlay check: {matched}/{len(lines)} lines readable")
+            if matched < len(lines) and clock.left() > 40:
+                await state.thoughts.say("Text in the image needs a fix. Redrawing.")
+                first_model = state.model_used
+                retry_models = [m for m in ranked if m != first_model and "lite" not in m.lower()] or [m for m in ranked if m != first_model]
+                image_prompt += ("\n\nCRITICAL: the text must read exactly as listed, spelled letter for letter, large and "
+                                 "high-contrast so it is easy to read.")
+                for model in retry_models[:1]:
+                    uri2 = await attempt(model)
+                    if not uri2:
+                        continue
+                    matched2, transcript2 = await _verify_overlay(box, state, uri2, lines, ranked, clock) if clock.left() > 30 else (0, "")
+                    state.record["overlay_check_retry"] = {"model": model, "matched": matched2, "transcript": transcript2[:400]}
+                    if matched2 > matched or (matched2 == matched and not transcript):
+                        output_uri, state.model_used = uri2, model
         produced["uri"], produced["plan"] = output_uri, plan
         produced["model"] = state.model_used
 
@@ -1166,6 +1516,16 @@ async def solve_image(state: RunState, box: BlackBox) -> str:
         return "no-image"
 
     submit_errors: list[str] = state.record.setdefault("image_submit_errors", [])
+    reasoning = produced.get("reasoning") or {}
+    rationale = str(reasoning.get("report") or "").strip()
+    if reasoning.get("facts") and rationale and len(rationale) < 600:
+        rationale += " Facts: " + "; ".join(f"{k}: {v}" for k, v in list(reasoning["facts"].items())[:6])
+    if not rationale:
+        rationale = (f"Applied the requested change: {re.sub(chr(10), ' ', prompt)[:240]}. "
+                     "Kept identity, pose, framing, background and lighting as in the input.") if input_uri else \
+                    f"Generated to the brief: {re.sub(chr(10), ' ', prompt)[:300]}."
+    state.record["rationale"] = rationale[:900]
+    state.image_rationale = rationale[:900]
     result = await _submit_image(state, box, output_uri, plan, clock, submit_errors)
     # A failed submit (for example an image too large for transport) gets one more
     # try with the next image model while time allows.
@@ -1209,7 +1569,7 @@ async def _submit_image(state: RunState, box: BlackBox, uri: str, plan: str, clo
     await state.thoughts.say("Submitting the image.", force=True)
     submit = box.find("arena.image.submit_edit")
     if submit:
-        r = await box.call(submit.name, {"edited_image": uri, "client_metrics": metrics, "rationale": "gauntlet explorer image flow",
+        r = await box.call(submit.name, {"edited_image": uri, "client_metrics": metrics, "rationale": state.image_rationale or "image edit",
                                          "agent_id": state.agent_id}, source="submit", mine=False, timeout_s=90)
         if not r.get("error"):
             state.record["timeline"]["submit_done"] = round(clock.elapsed(), 1)

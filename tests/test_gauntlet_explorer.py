@@ -131,6 +131,41 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(_tool_entries({"notes": ["oracle"]}), [])
 
 
+class EventTaskTests(unittest.TestCase):
+    """Challenge texts from the live event (Nov 5, 2026)."""
+
+    def test_image_reasoning_routes(self) -> None:
+        from gauntlet.runner import FACTS_RE, REASONING_RE, TEXT_OUT_RE
+
+        identify = ("Use visual reasoning to identify the person shown, then infer the specific event location from that "
+                    "identity and context clues. Workflow requirement: (1) inspect the image with image_analyze ... "
+                    "(3) create an answer-sheet overlay on the image with exactly these lines: 'Person: <name>' and "
+                    "'Event location: <location>'.")
+        self.assertTrue(REASONING_RE.search(identify) and FACTS_RE.search(identify) and TEXT_OUT_RE.search(identify))
+        blur = "Detect every visible human face and apply a strong privacy blur to each face region. Detect and blur all faces, then report detections."
+        self.assertTrue(REASONING_RE.search(blur))
+        self.assertFalse(FACTS_RE.search(blur))
+        anomaly = "Inspect the image, identify the most obvious visual inconsistency affecting a person and nearby details."
+        self.assertTrue(REASONING_RE.search(anomaly))
+        self.assertFalse(FACTS_RE.search(anomaly))
+        cap = ("Give the subject a blue baseball cap while keeping the rest of the scene unchanged. Edit the provided image "
+               "while preserving subject identity and overall composition.")
+        self.assertFalse(REASONING_RE.search(cap))
+
+    def test_field_case_rule_is_not_whole_answer(self) -> None:
+        spec = answer.infer_format("Return exactly one line in this exact format: NV-CODE: NVIDIA_YEAR|NVIDIA_AGE|ARCH_FAMILY|PARITY. "
+                                   "Use uppercase for ARCH_FAMILY and PARITY.")
+        self.assertFalse(spec.upper)
+        self.assertEqual(answer.enforce("NV-CODE: 1993|33|HOPPER|ODD", spec)[0], "NV-CODE: 1993|33|HOPPER|ODD")
+        self.assertTrue(answer.infer_format("Answer in UPPERCASE.").upper)
+
+    def test_overlay_keeps_text_rule_off(self) -> None:
+        strategy = MyStrategy()
+        ctx = ChallengeContext(challenge_type="image_edit", image_url="data:image/png;base64,AA==",
+                               rules="Create an answer-sheet overlay with exactly these lines. Keep text legible, avoid logo text.")
+        self.assertNotIn("Absolutely no text", strategy.build_image_prompt(ctx))
+
+
 class AnswerTests(unittest.TestCase):
     def test_extract(self) -> None:
         self.assertEqual(answer.extract_answer("<think>hmm ANSWER: no</think>\nANSWER: Bob\nbecause"), "Bob")

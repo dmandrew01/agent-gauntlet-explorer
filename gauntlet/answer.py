@@ -80,9 +80,12 @@ def infer_format(rules: str, description: str = "") -> FormatSpec:
         spec.integer = True
     elif re.search(r"\b(number|numeric value|digits?)\s+only\b|\bonly (the|a) number\b", low):
         spec.number = True
-    if re.search(r"\b(uppercase|upper case|all caps|capital letters)\b", low):
+    # Case rules apply to the whole answer only when they say so; "Use uppercase for
+    # ARCH_FAMILY" (event web_search_001) covers one field, not the payload.
+    whole = r"(answer|respond|reply|output|return|write|submit)\w*\W+(?:\w+\W+){0,4}?(in )?"
+    if re.search(whole + r"(uppercase|upper case|all caps|capital letters)\b", low) and not re.search(r"(uppercase|upper case) for\b", low):
         spec.upper = True
-    elif re.search(r"\b(lowercase|lower case)\b", low):
+    elif re.search(whole + r"(lowercase|lower case)\b", low) and not re.search(r"(lowercase|lower case) for\b", low):
         spec.lower = True
     if re.search(r"\b(yes or no|yes/no|true or false)\b", low):
         spec.yes_no = True
